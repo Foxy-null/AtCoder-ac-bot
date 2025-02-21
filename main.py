@@ -117,6 +117,7 @@ async def check_ac_submissions():
                         print(f"New AC submission found for {handle}")
                         contest_id = submission["contest_id"]
                         problem_id = submission["problem_id"]
+                        language = submission["language"]
 
                         # 問題タイトルの取得
                         problem_api_url = (
@@ -166,6 +167,29 @@ async def check_ac_submissions():
                                 if problem_difficulty:
                                     difficulty = problem_difficulty.get("difficulty")
 
+                        # Embedの色を難易度に応じて決定
+                        if difficulty is not None:
+                            if difficulty < 0:
+                                color = discord.Color.default()
+                            if difficulty < 400:
+                                color = discord.Color.from_rgb(128, 128, 128)
+                            elif difficulty < 800:
+                                color = discord.Color.from_rgb(128, 64, 0)
+                            elif difficulty < 1200:
+                                discord.Color.from_rgb(36, 128, 36)
+                            elif difficulty < 1600:
+                                discord.Color.from_rgb(0, 192, 192)
+                            elif difficulty < 2000:
+                                discord.Color.from_rgb(54, 54, 252)
+                            elif difficulty < 2400:
+                                discord.Color.from_rgb(192, 192, 0)
+                            elif difficulty < 2800:
+                                discord.Color.from_rgb(255, 128, 0)
+                            else:
+                                discord.Color.from_rgb(252, 54, 54)
+                        else:
+                            color = discord.Color.default()
+
                         if channel:
                             user = await bot.fetch_user(discord_id)
                             avatar_url = user.display_avatar.url
@@ -179,7 +203,8 @@ async def check_ac_submissions():
                             embed = discord.Embed(
                                 title=title,
                                 url=problem_url,
-                                description=f"[(🔎 提出を確認)]({submission_url})\n" + diff_text,
+                                description=f"[🔎提出]({submission_url}) | " + diff_text + f" | {language}",
+                                color=color
                             )
                             embed.set_author(
                                 name="[AC] Foxy_null",
