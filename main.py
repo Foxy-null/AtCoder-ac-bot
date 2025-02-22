@@ -201,13 +201,13 @@ async def check_ac_submissions():
                             )
 
                             embed = discord.Embed(
-                                title=title,
+                                title=title + " <:AC_bot:1342654382277398700>",
                                 url=problem_url,
                                 description=f"[🔎提出]({submission_url}) | " + diff_text + f" | {language}",
                                 color=color
                             )
                             embed.set_author(
-                                name="[AC] Foxy_null",
+                                name="Foxy_null",
                                 url=user_url,
                                 icon_url=avatar_url,
                             )
