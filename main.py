@@ -207,7 +207,7 @@ async def check_ac_submissions():
                                 color=color
                             )
                             embed.set_author(
-                                name="Foxy_null",
+                                name=user.name,
                                 url=user_url,
                                 icon_url=avatar_url,
                             )
