@@ -23,6 +23,7 @@ import aiohttp
 import sqlite3
 import configparser
 import time
+import math
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -164,8 +165,18 @@ async def check_ac_submissions():
                             if diff_resp.status == 200:
                                 difficulties = await diff_resp.json()
                                 problem_difficulty = difficulties.get(problem_id)
-                                if problem_difficulty:
-                                    difficulty = problem_difficulty.get("difficulty")
+                                if (
+                                    problem_difficulty
+                                    and "difficulty" in problem_difficulty
+                                ):
+                                    diff = problem_difficulty["difficulty"]
+                                    if diff <= 400:
+                                        diff = int(
+                                            400.0 / math.exp((400.0 - diff) / 400.0)
+                                        )
+                                    difficulty = diff
+                                else:
+                                    difficulty = 0
 
                         # Embedの色を難易度に応じて決定
                         if difficulty is not None:
@@ -203,8 +214,10 @@ async def check_ac_submissions():
                             embed = discord.Embed(
                                 title=title + " <:AC_bot:1342654382277398700>",
                                 url=problem_url,
-                                description=f"[🔎提出]({submission_url}) | " + diff_text + f" | {language}",
-                                color=color
+                                description=f"[🔎提出]({submission_url}) | "
+                                + diff_text
+                                + f" | {language}",
+                                color=color,
                             )
                             embed.set_author(
                                 name=user.name,
