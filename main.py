@@ -181,7 +181,7 @@ async def check_ac_submissions():
                         # Embedの色を難易度に応じて決定
                         if difficulty is not None:
                             if difficulty < 0:
-                                color = discord.Color.default()
+                                color = discord.Color.from_rgb(0, 0, 0)
                             if difficulty < 400:
                                 color = discord.Color.from_rgb(128, 128, 128)
                             elif difficulty < 800:
@@ -199,7 +199,7 @@ async def check_ac_submissions():
                             else:
                                 discord.Color.from_rgb(252, 54, 54)
                         else:
-                            color = discord.Color.default()
+                            color = discord.Color.from_rgb(0, 0, 0)
 
                         if channel:
                             user = await bot.fetch_user(discord_id)
