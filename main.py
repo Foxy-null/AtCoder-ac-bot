@@ -187,17 +187,17 @@ async def check_ac_submissions():
                             elif difficulty < 800:
                                 color = discord.Color.from_rgb(128, 64, 0)
                             elif difficulty < 1200:
-                                discord.Color.from_rgb(36, 128, 36)
+                                color = discord.Color.from_rgb(36, 128, 36)
                             elif difficulty < 1600:
-                                discord.Color.from_rgb(0, 192, 192)
+                                color = discord.Color.from_rgb(0, 192, 192)
                             elif difficulty < 2000:
-                                discord.Color.from_rgb(54, 54, 252)
+                                color = discord.Color.from_rgb(54, 54, 252)
                             elif difficulty < 2400:
-                                discord.Color.from_rgb(192, 192, 0)
+                                color = discord.Color.from_rgb(192, 192, 0)
                             elif difficulty < 2800:
-                                discord.Color.from_rgb(255, 128, 0)
+                                color = discord.Color.from_rgb(255, 128, 0)
                             else:
-                                discord.Color.from_rgb(252, 54, 54)
+                                color = discord.Color.from_rgb(252, 54, 54)
                         else:
                             color = discord.Color.from_rgb(0, 0, 0)
 
