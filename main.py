@@ -224,8 +224,10 @@ async def check_ac_submissions():
                                 url=user_url,
                                 icon_url=avatar_url,
                             )
-
-                            await channel.send(embed=embed)
+                            try:
+                                await channel.send(embed=embed)
+                            except Exception as e:
+                                print(f"メッセージ送信時にエラーが発生しました: {e}")
 
                         # 最後の提出IDを更新
                         conn = get_db_connection()
