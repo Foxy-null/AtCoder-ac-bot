@@ -95,6 +95,7 @@ async def check_ac_submissions():
             )  # 初回は1分前から
 
             url = f"https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions?user={handle}&from_second={from_second}"
+            time.sleep(1)
             async with session.get(url) as resp:
                 if resp.status != 200:
                     print(f"Failed to fetch submissions for {handle}")
@@ -124,6 +125,7 @@ async def check_ac_submissions():
                         problem_api_url = (
                             f"https://kenkoooo.com/atcoder/resources/problems.json"
                         )
+                        time.sleep(1)
                         async with session.get(problem_api_url) as pr_resp:
                             if pr_resp.status != 200:
                                 print(f"Failed to fetch problem info for {problem_id}")
@@ -161,6 +163,7 @@ async def check_ac_submissions():
                         difficulty_api_url = (
                             "https://kenkoooo.com/atcoder/resources/problem-models.json"
                         )
+                        time.sleep(1)
                         async with session.get(difficulty_api_url) as diff_resp:
                             if diff_resp.status == 200:
                                 difficulties = await diff_resp.json()
