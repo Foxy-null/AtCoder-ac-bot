@@ -173,11 +173,11 @@ async def check_ac_submissions():
                                     and "difficulty" in problem_difficulty
                                 ):
                                     diff = problem_difficulty["difficulty"]
-                                    if diff <= 400:
+                                    if diff is not None and diff <= 400:
                                         diff = int(
                                             400.0 / math.exp((400.0 - diff) / 400.0)
                                         )
-                                    difficulty = diff
+                                    difficulty = diff if diff is not None else 0
                                 else:
                                     difficulty = 0
 
