@@ -23,6 +23,8 @@ import aiohttp
 import sqlite3
 import configparser
 import time
+import datetime
+import pytz
 import math
 
 intents = discord.Intents.default()
@@ -98,15 +100,14 @@ async def check_ac_submissions():
             time.sleep(1)
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    print(f"Failed to fetch submissions for {handle}")
+                    print(f"Failed to fetch submissions for {handle}, retrying...")
                     print(f"API Error: {resp.status}")
                     continue
                 submissions = await resp.json()
+                new_latest_time = last_checked_time
 
                 # デバッグ↓
                 # print(f"Successfully fetched submissions for {handle}. Status: {resp.status}")
-
-            new_latest_time = last_checked_time
 
             # 最新のACのみ探す
             for submission in submissions:
@@ -226,6 +227,9 @@ async def check_ac_submissions():
                                 name=user.name,
                                 url=user_url,
                                 icon_url=avatar_url,
+                            )
+                            embed.set_footer(
+                                text=f"提出日時: {datetime.datetime.fromtimestamp(submission_time, pytz.timezone('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S')}"
                             )
                             try:
                                 await channel.send(embed=embed)
