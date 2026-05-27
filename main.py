@@ -1,31 +1,76 @@
+import configparser
+import datetime
+import math
+import re
 import sqlite3
+import time
+from collections import defaultdict
 
-conn = sqlite3.connect("bot.db")
-c = conn.cursor()
-c.execute(
-    """
-    CREATE TABLE IF NOT EXISTS users (
-        discord_id INTEGER PRIMARY KEY,
-        atcoder_handle TEXT NOT NULL,
-        channel_id INTEGER NOT NULL,
-        last_submission_id INTEGER,
-        last_checked_time INTEGER
-    )
-"""
-)
-conn.commit()
-conn.close()
-
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-import aiohttp
-import sqlite3
-import configparser
-import time
-import datetime
 import pytz
-import math
+
+
+DB_PATH = "bot.db"
+ATCODER_PROFILE_URL = "https://atcoder.jp/users/{handle}"
+ATCODER_AVATAR_URL = "https://img.atcoder.jp/assets/icon/avatar.png"
+ATCODER_PROBLEMS_URL = "https://kenkoooo.com/atcoder/resources/problems.json"
+ATCODER_DIFFICULTY_URL = "https://kenkoooo.com/atcoder/resources/problem-models.json"
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            discord_id INTEGER PRIMARY KEY,
+            atcoder_handle TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
+            last_submission_id INTEGER,
+            last_checked_time INTEGER
+        )
+        """
+    )
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id INTEGER,
+            atcoder_handle TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
+            last_submission_id INTEGER,
+            last_checked_time INTEGER,
+            UNIQUE(atcoder_handle, channel_id)
+        )
+        """
+    )
+    c.execute(
+        """
+        INSERT OR IGNORE INTO subscriptions (
+            discord_id,
+            atcoder_handle,
+            channel_id,
+            last_submission_id,
+            last_checked_time
+        )
+        SELECT
+            discord_id,
+            atcoder_handle,
+            channel_id,
+            last_submission_id,
+            last_checked_time
+        FROM users
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -36,26 +81,127 @@ config = configparser.ConfigParser()
 config.read("config.ini")
 
 
-# データベース接続用
 def get_db_connection():
-    conn = sqlite3.connect("bot.db")  # ./bot.dbにアクセスするよ
-    return conn
+    return sqlite3.connect(DB_PATH)
 
 
-# AtCoderハンドルでユーザーを登録するやつ
+def difficulty_to_color(difficulty):
+    if difficulty is None:
+        return discord.Color.from_rgb(0, 0, 0)
+    if difficulty < 0:
+        return discord.Color.from_rgb(0, 0, 0)
+    if difficulty < 400:
+        return discord.Color.from_rgb(128, 128, 128)
+    if difficulty < 800:
+        return discord.Color.from_rgb(128, 64, 0)
+    if difficulty < 1200:
+        return discord.Color.from_rgb(36, 128, 36)
+    if difficulty < 1600:
+        return discord.Color.from_rgb(0, 192, 192)
+    if difficulty < 2000:
+        return discord.Color.from_rgb(54, 54, 252)
+    if difficulty < 2400:
+        return discord.Color.from_rgb(192, 192, 0)
+    if difficulty < 2800:
+        return discord.Color.from_rgb(255, 128, 0)
+    return discord.Color.from_rgb(252, 54, 54)
+
+
+async def fetch_atcoder_profile(session, handle):
+    avatar_url = ATCODER_AVATAR_URL
+    try:
+        async with session.get(ATCODER_PROFILE_URL.format(handle=handle)) as resp:
+            if resp.status != 200:
+                return {"display_name": handle, "avatar_url": avatar_url}
+            html = await resp.text()
+    except Exception:
+        return {"display_name": handle, "avatar_url": avatar_url}
+
+    match = re.search(
+        r"""<img class=['"]avatar['"] src=['"]([^'"]+)['"]""",
+        html,
+    )
+    if match:
+        avatar_url = match.group(1)
+        if avatar_url.startswith("//"):
+            avatar_url = f"https:{avatar_url}"
+
+    return {"display_name": handle, "avatar_url": avatar_url}
+
+
+async def resolve_author(session, handle, discord_id, atcoder_profile):
+    user_url = ATCODER_PROFILE_URL.format(handle=handle)
+
+    if discord_id is not None:
+        try:
+            discord_user = await bot.fetch_user(discord_id)
+            return discord_user.name, discord_user.display_avatar.url, user_url
+        except Exception:
+            pass
+
+    if atcoder_profile is None:
+        atcoder_profile = await fetch_atcoder_profile(session, handle)
+
+    return (
+        atcoder_profile["display_name"],
+        atcoder_profile["avatar_url"],
+        user_url,
+    )
+
+
+async def get_problem_catalog(session, cache):
+    if cache["problems"] is not None and cache["difficulty"] is not None:
+        return
+
+    if cache["problems"] is None:
+        try:
+            async with session.get(ATCODER_PROBLEMS_URL) as resp:
+                if resp.status == 200:
+                    problems = await resp.json()
+                    cache["problems"] = {
+                        (problem["contest_id"], problem["id"]): problem["title"]
+                        for problem in problems
+                    }
+                else:
+                    cache["problems"] = {}
+        except Exception:
+            cache["problems"] = {}
+
+    if cache["difficulty"] is None:
+        try:
+            async with session.get(ATCODER_DIFFICULTY_URL) as resp:
+                if resp.status == 200:
+                    cache["difficulty"] = await resp.json()
+                else:
+                    cache["difficulty"] = {}
+        except Exception:
+            cache["difficulty"] = {}
+
+
+def build_submission_urls(handle, submission):
+    contest_id = submission["contest_id"]
+    problem_id = submission["problem_id"]
+    submission_id = submission["id"]
+    return {
+        "submission_url": f"https://atcoder.jp/contests/{contest_id}/submissions/{submission_id}",
+        "problem_url": f"https://atcoder.jp/contests/{contest_id}/tasks/{problem_id}",
+        "user_url": ATCODER_PROFILE_URL.format(handle=handle),
+    }
+
+
 @bot.tree.command(name="register", description="問題をACした際の通知を登録します")
 @app_commands.describe(
-    user="紐づけるDiscordユーザー",
+    user="紐づけるDiscordユーザー（省略可）",
     channel="通知を送信するチャンネル",
     atcoder_handle="登録したいAtCoderハンドル",
 )
 async def register(
     interaction: discord.Interaction,
-    user: discord.User,
     atcoder_handle: str,
     channel: discord.TextChannel,
+    user: discord.User | None = None,
 ):
-    discord_id = user.id
+    discord_id = user.id if user else None
     channel_id = channel.id
     current_time = int(time.time())
 
@@ -63,220 +209,232 @@ async def register(
     c = conn.cursor()
     c.execute(
         """
-        INSERT OR REPLACE INTO users 
-        (discord_id, atcoder_handle, channel_id, last_checked_time) 
+        INSERT INTO subscriptions (
+            discord_id,
+            atcoder_handle,
+            channel_id,
+            last_checked_time
+        )
         VALUES (?, ?, ?, ?)
-    """,
+        ON CONFLICT(atcoder_handle, channel_id) DO UPDATE SET
+            discord_id = excluded.discord_id
+        """,
         (discord_id, atcoder_handle, channel_id, current_time),
     )
     conn.commit()
     conn.close()
 
+    if user:
+        user_text = f"{user.mention} に"
+    else:
+        user_text = "Discordユーザーなしで"
+
     await interaction.response.send_message(
-        f"{user.mention} に AtCoderのハンドル 「{atcoder_handle}」 を紐づけて登録しました！\nACをした際の通知は {channel.mention} に送信されます。"
+        f"{user_text} AtCoderのハンドル 「{atcoder_handle}」 を登録しました！\n"
+        f"ACをした際の通知は {channel.mention} に送信されます。"
     )
 
 
-# 毎分ACをチェックするタスク
 @tasks.loop(minutes=1)
 async def check_ac_submissions():
     conn = get_db_connection()
     c = conn.cursor()
     c.execute(
-        "SELECT discord_id, atcoder_handle, channel_id, last_submission_id, last_checked_time FROM users"
+        """
+        SELECT id, discord_id, atcoder_handle, channel_id, last_submission_id, last_checked_time
+        FROM subscriptions
+        """
     )
-    users = c.fetchall()
+    rows = c.fetchall()
     conn.close()
+
+    subscriptions_by_handle = defaultdict(list)
+    for row in rows:
+        subscription = {
+            "id": row[0],
+            "discord_id": row[1],
+            "atcoder_handle": row[2],
+            "channel_id": row[3],
+            "last_submission_id": row[4],
+            "last_checked_time": row[5],
+        }
+        subscriptions_by_handle[subscription["atcoder_handle"]].append(subscription)
 
     async with aiohttp.ClientSession() as session:
         current_time = int(time.time())
-        for user in users:
-            discord_id, handle, channel_id, last_submission_id, last_checked_time = user
-            from_second = (
-                last_checked_time if last_checked_time else current_time - 60
-            )  # 初回は1分前から
+        catalog_cache = {"problems": None, "difficulty": None}
+        submission_cache = {}
 
-            url = f"https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions?user={handle}&from_second={from_second}"
-            time.sleep(1)
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    print(f"Failed to fetch submissions for {handle}, retrying...")
-                    print(f"API Error: {resp.status}")
-                    continue
-                submissions = await resp.json()
+        async def get_submission_metadata(submission):
+            submission_id = submission["id"]
+            cached = submission_cache.get(submission_id)
+            if cached is not None:
+                return cached
+
+            await get_problem_catalog(session, catalog_cache)
+            contest_id = submission["contest_id"]
+            problem_id = submission["problem_id"]
+            problem_title = catalog_cache["problems"].get(
+                (contest_id, problem_id),
+                f"{contest_id} {problem_id}",
+            )
+
+            problem_difficulty = catalog_cache["difficulty"].get(problem_id)
+            difficulty = 0
+            if (
+                problem_difficulty
+                and isinstance(problem_difficulty, dict)
+                and "difficulty" in problem_difficulty
+            ):
+                diff = problem_difficulty["difficulty"]
+                if diff is not None and diff <= 400:
+                    diff = int(400.0 / math.exp((400.0 - diff) / 400.0))
+                difficulty = diff if diff is not None else 0
+
+            cached = {
+                "title": problem_title,
+                "difficulty": difficulty,
+                "color": difficulty_to_color(difficulty),
+                **build_submission_urls(submission["atcoder_handle"], submission),
+            }
+            submission_cache[submission_id] = cached
+            return cached
+
+        for handle, subscriptions in subscriptions_by_handle.items():
+            from_second = min(
+                subscription["last_checked_time"]
+                if subscription["last_checked_time"]
+                else current_time - 60
+                for subscription in subscriptions
+            )
+
+            submissions_url = (
+                "https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions"
+                f"?user={handle}&from_second={from_second}"
+            )
+            try:
+                async with session.get(submissions_url) as resp:
+                    if resp.status != 200:
+                        print(f"Failed to fetch submissions for {handle}, retrying...")
+                        print(f"API Error: {resp.status}")
+                        continue
+                    submissions = await resp.json()
+            except Exception as e:
+                print(f"Failed to fetch submissions for {handle}: {e}")
+                continue
+
+            atcoder_profile = None
+            if any(subscription["discord_id"] is None for subscription in subscriptions):
+                atcoder_profile = await fetch_atcoder_profile(session, handle)
+
+            for subscription in subscriptions:
+                discord_id = subscription["discord_id"]
+                channel_id = subscription["channel_id"]
+                last_submission_id = subscription["last_submission_id"]
+                last_checked_time = subscription["last_checked_time"]
                 new_latest_time = last_checked_time
 
-                # デバッグ↓
-                # print(f"Successfully fetched submissions for {handle}. Status: {resp.status}")
+                for submission in submissions:
+                    submission_time = submission["epoch_second"]
+                    if new_latest_time is None or submission_time > new_latest_time:
+                        new_latest_time = submission_time
 
-            # 最新のACのみ探す
-            for submission in submissions:
-                submission_time = submission["epoch_second"]
-                if submission["result"] == "AC":
+                    if submission["result"] != "AC":
+                        continue
+
                     if (
-                        last_submission_id is None
-                        or submission["id"] > last_submission_id
+                        last_submission_id is not None
+                        and submission["id"] <= last_submission_id
                     ):
-                        print(f"New AC submission found for {handle}")
-                        contest_id = submission["contest_id"]
-                        problem_id = submission["problem_id"]
-                        language = submission["language"]
+                        continue
 
-                        # 問題タイトルの取得
-                        problem_api_url = (
-                            f"https://kenkoooo.com/atcoder/resources/problems.json"
+                    metadata = await get_submission_metadata(
+                        {
+                            **submission,
+                            "atcoder_handle": handle,
+                        }
+                    )
+                    channel = bot.get_channel(channel_id)
+                    if channel is None:
+                        try:
+                            channel = await bot.fetch_channel(channel_id)
+                        except Exception:
+                            channel = None
+
+                    if channel:
+                        author_name, avatar_url, author_url = await resolve_author(
+                            session,
+                            handle,
+                            discord_id,
+                            atcoder_profile,
                         )
-                        time.sleep(1)
-                        async with session.get(problem_api_url) as pr_resp:
-                            if pr_resp.status != 200:
-                                print(f"Failed to fetch problem info for {problem_id}")
-                                continue
-                            problems = await pr_resp.json()
-                            problem = next(
-                                (
-                                    p
-                                    for p in problems
-                                    if p["contest_id"] == contest_id
-                                    and p["id"] == problem_id
-                                ),
-                                None,
-                            )
-
-                            # 「[記号] - [問題名]」的なやつを取得する
-                            title = (
-                                problem["title"]
-                                if problem
-                                else f"{contest_id} {problem_id}"
-                            )
-
-                        # 提出URL
-                        submission_id = submission["id"]
-                        last_submission_id = submission_id
-                        submission_url = f"https://atcoder.jp/contests/{contest_id}/submissions/{submission_id}"
-                        problem_url = f"https://atcoder.jp/contests/{contest_id}/tasks/{problem_id}"
-                        user_url = f"https://atcoder.jp/users/{handle}"
-
-                        # メッセージの送信
-                        channel = bot.get_channel(channel_id)
-                        difficulty = None
-
-                        # Diff情報を取得するAPIからデータを取得
-                        difficulty_api_url = (
-                            "https://kenkoooo.com/atcoder/resources/problem-models.json"
+                        diff_text = (
+                            f"diff: {metadata['difficulty']}"
+                            if metadata["difficulty"] is not None
+                            else "diff: 判定不可"
                         )
-                        time.sleep(1)
-                        async with session.get(difficulty_api_url) as diff_resp:
-                            if diff_resp.status == 200:
-                                difficulties = await diff_resp.json()
-                                problem_difficulty = difficulties.get(problem_id)
-                                if (
-                                    problem_difficulty
-                                    and "difficulty" in problem_difficulty
-                                ):
-                                    diff = problem_difficulty["difficulty"]
-                                    if diff is not None and diff <= 400:
-                                        diff = int(
-                                            400.0 / math.exp((400.0 - diff) / 400.0)
-                                        )
-                                    difficulty = diff if diff is not None else 0
-                                else:
-                                    difficulty = 0
-
-                        # Embedの色を難易度に応じて決定
-                        if difficulty is not None:
-                            if difficulty < 0:
-                                color = discord.Color.from_rgb(0, 0, 0)
-                            if difficulty < 400:
-                                color = discord.Color.from_rgb(128, 128, 128)
-                            elif difficulty < 800:
-                                color = discord.Color.from_rgb(128, 64, 0)
-                            elif difficulty < 1200:
-                                color = discord.Color.from_rgb(36, 128, 36)
-                            elif difficulty < 1600:
-                                color = discord.Color.from_rgb(0, 192, 192)
-                            elif difficulty < 2000:
-                                color = discord.Color.from_rgb(54, 54, 252)
-                            elif difficulty < 2400:
-                                color = discord.Color.from_rgb(192, 192, 0)
-                            elif difficulty < 2800:
-                                color = discord.Color.from_rgb(255, 128, 0)
-                            else:
-                                color = discord.Color.from_rgb(252, 54, 54)
-                        else:
-                            color = discord.Color.from_rgb(0, 0, 0)
-
-                        if channel:
-                            user = await bot.fetch_user(discord_id)
-                            avatar_url = user.display_avatar.url
-
-                            diff_text = (
-                                f"diff: {difficulty}"
-                                if difficulty is not None
-                                else "diff: 判定不可"
+                        embed = discord.Embed(
+                            title=metadata["title"] + " <:AC_bot:1342654382277398700>",
+                            url=metadata["problem_url"],
+                            description=f"[🔎提出]({metadata['submission_url']}) | "
+                            + diff_text
+                            + f" | {submission['language']}",
+                            color=metadata["color"],
+                        )
+                        embed.set_author(
+                            name=author_name,
+                            url=author_url,
+                            icon_url=avatar_url,
+                        )
+                        embed.set_footer(
+                            text=(
+                                "提出日時: "
+                                f"{datetime.datetime.fromtimestamp(submission_time, pytz.timezone('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S')}"
                             )
+                        )
+                        try:
+                            await channel.send(embed=embed)
+                        except Exception as e:
+                            print(f"メッセージ送信時にエラーが発生しました: {e}")
+                            continue
 
-                            embed = discord.Embed(
-                                title=title + " <:AC_bot:1342654382277398700>",
-                                url=problem_url,
-                                description=f"[🔎提出]({submission_url}) | "
-                                + diff_text
-                                + f" | {language}",
-                                color=color,
-                            )
-                            embed.set_author(
-                                name=user.name,
-                                url=user_url,
-                                icon_url=avatar_url,
-                            )
-                            embed.set_footer(
-                                text=f"提出日時: {datetime.datetime.fromtimestamp(submission_time, pytz.timezone('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S')}"
-                            )
-                            try:
-                                await channel.send(embed=embed)
-                            except Exception as e:
-                                print(f"メッセージ送信時にエラーが発生しました: {e}")
-
-                        # 最後の提出IDを更新
                         conn = get_db_connection()
                         c = conn.cursor()
                         c.execute(
                             """
-                            UPDATE users 
+                            UPDATE subscriptions
                             SET last_submission_id = ?, last_checked_time = ?
-                            WHERE discord_id = ?
-                        """,
-                            (submission_id, submission_time, discord_id),
+                            WHERE id = ?
+                            """,
+                            (submission["id"], submission_time, subscription["id"]),
                         )
                         conn.commit()
                         conn.close()
-                        # break  # 最新のACだけ通知
 
-                # `from_second` を更新
-                if new_latest_time is None or submission_time > new_latest_time:
-                    new_latest_time = submission_time
+                        last_submission_id = submission["id"]
+                        last_checked_time = submission_time
 
-            # AC以外の提出でも `last_checked_time` を更新する
-            if new_latest_time:
-                conn = get_db_connection()
-                c = conn.cursor()
-                c.execute(
-                    """
-                    UPDATE users 
-                    SET last_checked_time = ?
-                    WHERE discord_id = ?
-                """,
-                    (new_latest_time, discord_id),
-                )
-                conn.commit()
-                conn.close()
+                if new_latest_time is not None and new_latest_time != last_checked_time:
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute(
+                        """
+                        UPDATE subscriptions
+                        SET last_checked_time = ?
+                        WHERE id = ?
+                        """,
+                        (new_latest_time, subscription["id"]),
+                    )
+                    conn.commit()
+                    conn.close()
 
 
-# botが準備完了したときにタスクを開始
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f"Logged in as {bot.user}")
-    check_ac_submissions.start()
+    if not check_ac_submissions.is_running():
+        check_ac_submissions.start()
 
 
 bot.run(config["DISCORD"]["TOKEN"])
