@@ -12,62 +12,13 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import pytz
 
+from database import DB_PATH, init_db
 
-DB_PATH = "bot.db"
+
 ATCODER_PROFILE_URL = "https://atcoder.jp/users/{handle}"
 ATCODER_AVATAR_URL = "https://img.atcoder.jp/assets/icon/avatar.png"
 ATCODER_PROBLEMS_URL = "https://kenkoooo.com/atcoder/resources/problems.json"
 ATCODER_DIFFICULTY_URL = "https://kenkoooo.com/atcoder/resources/problem-models.json"
-
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            discord_id INTEGER PRIMARY KEY,
-            atcoder_handle TEXT NOT NULL,
-            channel_id INTEGER NOT NULL,
-            last_submission_id INTEGER,
-            last_checked_time INTEGER
-        )
-        """
-    )
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            discord_id INTEGER,
-            atcoder_handle TEXT NOT NULL,
-            channel_id INTEGER NOT NULL,
-            last_submission_id INTEGER,
-            last_checked_time INTEGER,
-            UNIQUE(atcoder_handle, channel_id)
-        )
-        """
-    )
-    c.execute(
-        """
-        INSERT OR IGNORE INTO subscriptions (
-            discord_id,
-            atcoder_handle,
-            channel_id,
-            last_submission_id,
-            last_checked_time
-        )
-        SELECT
-            discord_id,
-            atcoder_handle,
-            channel_id,
-            last_submission_id,
-            last_checked_time
-        FROM users
-        """
-    )
-    conn.commit()
-    conn.close()
-
 
 init_db()
 
