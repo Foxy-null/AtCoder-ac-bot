@@ -314,6 +314,7 @@ async def check_ac_submissions():
     conn.close()
 
     if not rows:
+        set_submission_poll_time(int(time.time()))
         return
 
     channels, retry_channel_ids = await get_accessible_channels(
@@ -321,6 +322,8 @@ async def check_ac_submissions():
     )
     rows = [row for row in rows if row[3] in channels]
     if not rows:
+        if not retry_channel_ids:
+            set_submission_poll_time(int(time.time()))
         return
 
     subscriptions_by_handle = defaultdict(list)
