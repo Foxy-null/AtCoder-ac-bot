@@ -1,3 +1,4 @@
+import asyncio
 import configparser
 import datetime
 import math
@@ -12,13 +13,24 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import pytz
 
-from database import DB_PATH, delete_subscriptions_for_channel, init_db
+from database import (
+    DB_PATH,
+    delete_subscriptions_for_channel,
+    get_submission_poll_time,
+    init_db,
+    set_submission_poll_time,
+)
 
 
 ATCODER_PROFILE_URL = "https://atcoder.jp/users/{handle}"
 ATCODER_AVATAR_URL = "https://img.atcoder.jp/assets/icon/avatar.png"
 ATCODER_PROBLEMS_URL = "https://kenkoooo.com/atcoder/resources/problems.json"
 ATCODER_DIFFICULTY_URL = "https://kenkoooo.com/atcoder/resources/problem-models.json"
+ATCODER_SUBMISSIONS_URL = (
+    "https://kenkoooo.com/atcoder/atcoder-api/v3/from/{from_second}"
+)
+ATCODER_SUBMISSION_PAGE_LIMIT = 1000
+ATCODER_API_DELAY_SECONDS = 1.1
 
 
 intents = discord.Intents.default()
@@ -53,6 +65,7 @@ def unregister_channel(channel_id, reason):
 
 async def get_accessible_channels(channel_ids):
     channels = {}
+    retry_channel_ids = set()
     for channel_id in set(channel_ids):
         try:
             channel = bot.get_channel(channel_id)
@@ -66,6 +79,7 @@ async def get_accessible_channels(channel_ids):
                 f"通知先の確認に失敗しました: "
                 f"channel_id={channel_id} error={error}"
             )
+            retry_channel_ids.add(channel_id)
             continue
 
         if not can_send_notifications(channel):
@@ -73,7 +87,60 @@ async def get_accessible_channels(channel_ids):
             continue
 
         channels[channel_id] = channel
-    return channels
+    return channels, retry_channel_ids
+
+
+async def fetch_submissions_since(session, from_second):
+    submissions = {}
+    cursor = from_second
+
+    while True:
+        url = ATCODER_SUBMISSIONS_URL.format(from_second=cursor)
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    print(f"提出一覧の取得に失敗しました: status={response.status}")
+                    return None
+                page = await response.json()
+        except Exception as error:
+            print(f"提出一覧の取得に失敗しました: error={error}")
+            return None
+
+        for submission in page:
+            submissions[submission["id"]] = submission
+
+        if len(page) < ATCODER_SUBMISSION_PAGE_LIMIT:
+            ordered = sorted(
+                submissions.values(),
+                key=lambda submission: (
+                    submission["epoch_second"],
+                    submission["id"],
+                ),
+            )
+            return ordered
+
+        next_cursor = max(submission["epoch_second"] for submission in page)
+        if next_cursor <= cursor:
+            # ponytail: the upstream API cannot paginate over 1000 submissions
+            # in one second; keep the cursor unchanged rather than lose data.
+            print(
+                "提出一覧を安全にページングできません: "
+                f"from_second={cursor} count={len(page)}"
+            )
+            return None
+
+        cursor = next_cursor
+        await asyncio.sleep(ATCODER_API_DELAY_SECONDS)
+
+
+def group_registered_submissions(submissions, handles):
+    registered = {handle.lower() for handle in handles}
+    grouped = defaultdict(list)
+    for submission in submissions:
+        handle = submission["user_id"].lower()
+        if handle in registered:
+            grouped[handle].append(submission)
+    return grouped
 
 
 def difficulty_to_color(difficulty):
@@ -246,8 +313,15 @@ async def check_ac_submissions():
     rows = c.fetchall()
     conn.close()
 
-    channels = await get_accessible_channels(row[3] for row in rows)
+    if not rows:
+        return
+
+    channels, retry_channel_ids = await get_accessible_channels(
+        row[3] for row in rows
+    )
     rows = [row for row in rows if row[3] in channels]
+    if not rows:
+        return
 
     subscriptions_by_handle = defaultdict(list)
     for row in rows:
@@ -259,10 +333,11 @@ async def check_ac_submissions():
             "last_submission_id": row[4],
             "last_checked_time": row[5],
         }
-        subscriptions_by_handle[subscription["atcoder_handle"]].append(subscription)
+        subscriptions_by_handle[subscription["atcoder_handle"].lower()].append(
+            subscription
+        )
 
     async with aiohttp.ClientSession() as session:
-        current_time = int(time.time())
         catalog_cache = {"problems": None, "difficulty": None}
         submission_cache = {}
 
@@ -301,32 +376,26 @@ async def check_ac_submissions():
             submission_cache[submission_id] = cached
             return cached
 
+        from_second = get_submission_poll_time()
+        submissions = await fetch_submissions_since(session, from_second)
+        if submissions is None:
+            return
+        submissions_by_handle = group_registered_submissions(
+            submissions,
+            subscriptions_by_handle,
+        )
+        batch_failed = bool(retry_channel_ids)
+
         for handle, subscriptions in subscriptions_by_handle.items():
-            from_second = min(
-                subscription["last_checked_time"]
-                if subscription["last_checked_time"]
-                else current_time - 60
-                for subscription in subscriptions
-            )
-
-            submissions_url = (
-                "https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions"
-                f"?user={handle}&from_second={from_second}"
-            )
-            try:
-                async with session.get(submissions_url) as resp:
-                    if resp.status != 200:
-                        print(f"Failed to fetch submissions for {handle}, retrying...")
-                        print(f"API Error: {resp.status}")
-                        continue
-                    submissions = await resp.json()
-            except Exception as e:
-                print(f"Failed to fetch submissions for {handle}: {e}")
+            handle_submissions = submissions_by_handle.get(handle, ())
+            if not handle_submissions:
                 continue
-
             atcoder_profile = None
             if any(subscription["discord_id"] is None for subscription in subscriptions):
-                atcoder_profile = await fetch_atcoder_profile(session, handle)
+                atcoder_profile = await fetch_atcoder_profile(
+                    session,
+                    subscriptions[0]["atcoder_handle"],
+                )
 
             for subscription in subscriptions:
                 discord_id = subscription["discord_id"]
@@ -339,8 +408,13 @@ async def check_ac_submissions():
                 new_latest_time = last_checked_time
                 delivery_failed = False
 
-                for submission in submissions:
+                for submission in handle_submissions:
                     submission_time = submission["epoch_second"]
+                    if (
+                        last_checked_time is not None
+                        and submission_time < last_checked_time
+                    ):
+                        continue
                     if new_latest_time is None or submission_time > new_latest_time:
                         new_latest_time = submission_time
 
@@ -356,12 +430,12 @@ async def check_ac_submissions():
                     metadata = await get_submission_metadata(
                         {
                             **submission,
-                            "atcoder_handle": handle,
+                            "atcoder_handle": subscription["atcoder_handle"],
                         }
                     )
                     author_name, avatar_url, author_url = await resolve_author(
                         session,
-                        handle,
+                        subscription["atcoder_handle"],
                         discord_id,
                         atcoder_profile,
                     )
@@ -402,6 +476,7 @@ async def check_ac_submissions():
                             f"channel_id={channel_id} error={error}"
                         )
                         delivery_failed = True
+                        batch_failed = True
                         break
 
                     conn = get_db_connection()
@@ -437,6 +512,9 @@ async def check_ac_submissions():
                     )
                     conn.commit()
                     conn.close()
+
+        if not batch_failed and submissions:
+            set_submission_poll_time(submissions[-1]["epoch_second"])
 
 
 @bot.event

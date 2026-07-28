@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from database import delete_subscriptions_for_channel, init_db
+from database import (
+    delete_subscriptions_for_channel,
+    get_submission_poll_time,
+    init_db,
+    set_submission_poll_time,
+)
 
 
 class InitDbTest(unittest.TestCase):
@@ -78,6 +83,35 @@ class InitDbTest(unittest.TestCase):
                 ).fetchall()
 
             self.assertEqual(rows, [("carol", 102)])
+
+    def test_initializes_and_updates_submission_poll_time(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE users (
+                        discord_id INTEGER PRIMARY KEY,
+                        atcoder_handle TEXT NOT NULL,
+                        channel_id INTEGER NOT NULL,
+                        last_submission_id INTEGER,
+                        last_checked_time INTEGER
+                    )
+                    """
+                )
+                conn.executemany(
+                    "INSERT INTO users VALUES (?, ?, ?, ?, ?)",
+                    [
+                        (1, "alice", 101, 1001, 10001),
+                        (2, "bob", 102, 1002, 10002),
+                    ],
+                )
+
+            init_db(db_path)
+            self.assertEqual(get_submission_poll_time(db_path), 10002)
+
+            set_submission_poll_time(20001, db_path)
+            self.assertEqual(get_submission_poll_time(db_path), 20001)
 
 
 if __name__ == "__main__":
