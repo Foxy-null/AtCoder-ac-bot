@@ -33,9 +33,12 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
             patch.object(main.bot, "fetch_channel", new=AsyncMock()) as fetch_channel,
             patch.object(main, "unregister_channel") as unregister,
         ):
-            channels = await main.get_accessible_channels([101, 101])
+            channels, retry_channel_ids = await main.get_accessible_channels(
+                [101, 101]
+            )
 
         self.assertEqual(channels, {101: channel})
+        self.assertEqual(retry_channel_ids, set())
         get_channel.assert_called_once_with(101)
         fetch_channel.assert_not_awaited()
         unregister.assert_not_called()
@@ -46,9 +49,10 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
             patch.object(main.bot, "get_channel", return_value=channel),
             patch.object(main, "unregister_channel") as unregister,
         ):
-            channels = await main.get_accessible_channels([101])
+            channels, retry_channel_ids = await main.get_accessible_channels([101])
 
         self.assertEqual(channels, {})
+        self.assertEqual(retry_channel_ids, set())
         unregister.assert_called_once_with(101, "missing_permissions")
 
     async def test_deletes_channel_not_found_by_discord(self):
@@ -62,9 +66,10 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(main, "unregister_channel") as unregister,
         ):
-            channels = await main.get_accessible_channels([101])
+            channels, retry_channel_ids = await main.get_accessible_channels([101])
 
         self.assertEqual(channels, {})
+        self.assertEqual(retry_channel_ids, set())
         unregister.assert_called_once_with(101, error)
 
     async def test_keeps_registration_after_temporary_error(self):
@@ -78,9 +83,10 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(main, "unregister_channel") as unregister,
         ):
-            channels = await main.get_accessible_channels([101])
+            channels, retry_channel_ids = await main.get_accessible_channels([101])
 
         self.assertEqual(channels, {})
+        self.assertEqual(retry_channel_ids, {101})
         unregister.assert_not_called()
 
 
