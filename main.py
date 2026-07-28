@@ -12,16 +12,13 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import pytz
 
-from database import DB_PATH, init_db
+from database import DB_PATH, delete_subscriptions_for_channel, init_db
 
 
 ATCODER_PROFILE_URL = "https://atcoder.jp/users/{handle}"
 ATCODER_AVATAR_URL = "https://img.atcoder.jp/assets/icon/avatar.png"
 ATCODER_PROBLEMS_URL = "https://kenkoooo.com/atcoder/resources/problems.json"
 ATCODER_DIFFICULTY_URL = "https://kenkoooo.com/atcoder/resources/problem-models.json"
-
-
-init_db()
 
 
 intents = discord.Intents.default()
@@ -35,6 +32,48 @@ config.read("config.ini")
 
 def get_db_connection():
     return sqlite3.connect(DB_PATH)
+
+
+def can_send_notifications(channel):
+    permissions = channel.permissions_for(channel.guild.me)
+    return (
+        permissions.view_channel
+        and permissions.send_messages
+        and permissions.embed_links
+    )
+
+
+def unregister_channel(channel_id, reason):
+    deleted = delete_subscriptions_for_channel(channel_id)
+    print(
+        f"通知先を登録解除しました: channel_id={channel_id} "
+        f"deleted={deleted} reason={reason}"
+    )
+
+
+async def get_accessible_channels(channel_ids):
+    channels = {}
+    for channel_id in set(channel_ids):
+        try:
+            channel = bot.get_channel(channel_id)
+            if channel is None:
+                channel = await bot.fetch_channel(channel_id)
+        except (discord.Forbidden, discord.NotFound) as error:
+            unregister_channel(channel_id, error)
+            continue
+        except Exception as error:
+            print(
+                f"通知先の確認に失敗しました: "
+                f"channel_id={channel_id} error={error}"
+            )
+            continue
+
+        if not can_send_notifications(channel):
+            unregister_channel(channel_id, "missing_permissions")
+            continue
+
+        channels[channel_id] = channel
+    return channels
 
 
 def difficulty_to_color(difficulty):
@@ -153,6 +192,13 @@ async def register(
     channel: discord.TextChannel,
     user: discord.User | None = None,
 ):
+    if not can_send_notifications(channel):
+        await interaction.response.send_message(
+            "Botに通知の送信・埋め込み権限がないため登録できません。",
+            ephemeral=True,
+        )
+        return
+
     discord_id = user.id if user else None
     channel_id = channel.id
     current_time = int(time.time())
@@ -199,6 +245,9 @@ async def check_ac_submissions():
     )
     rows = c.fetchall()
     conn.close()
+
+    channels = await get_accessible_channels(row[3] for row in rows)
+    rows = [row for row in rows if row[3] in channels]
 
     subscriptions_by_handle = defaultdict(list)
     for row in rows:
@@ -282,9 +331,13 @@ async def check_ac_submissions():
             for subscription in subscriptions:
                 discord_id = subscription["discord_id"]
                 channel_id = subscription["channel_id"]
+                channel = channels.get(channel_id)
+                if channel is None:
+                    continue
                 last_submission_id = subscription["last_submission_id"]
                 last_checked_time = subscription["last_checked_time"]
                 new_latest_time = last_checked_time
+                delivery_failed = False
 
                 for submission in submissions:
                     submission_time = submission["epoch_second"]
@@ -306,67 +359,72 @@ async def check_ac_submissions():
                             "atcoder_handle": handle,
                         }
                     )
-                    channel = bot.get_channel(channel_id)
-                    if channel is None:
-                        try:
-                            channel = await bot.fetch_channel(channel_id)
-                        except Exception:
-                            channel = None
+                    author_name, avatar_url, author_url = await resolve_author(
+                        session,
+                        handle,
+                        discord_id,
+                        atcoder_profile,
+                    )
+                    diff_text = (
+                        f"diff: {metadata['difficulty']}"
+                        if metadata["difficulty"] is not None
+                        else "diff: 判定不可"
+                    )
+                    embed = discord.Embed(
+                        title=metadata["title"] + " <:AC_bot:1342654382277398700>",
+                        url=metadata["problem_url"],
+                        description=f"[🔎提出]({metadata['submission_url']}) | "
+                        + diff_text
+                        + f" | {submission['language']}",
+                        color=metadata["color"],
+                    )
+                    embed.set_author(
+                        name=author_name,
+                        url=author_url,
+                        icon_url=avatar_url,
+                    )
+                    embed.set_footer(
+                        text=(
+                            "提出日時: "
+                            f"{datetime.datetime.fromtimestamp(submission_time, pytz.timezone('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                    )
+                    try:
+                        await channel.send(embed=embed)
+                    except (discord.Forbidden, discord.NotFound) as error:
+                        unregister_channel(channel_id, error)
+                        channels.pop(channel_id, None)
+                        delivery_failed = True
+                        break
+                    except Exception as error:
+                        print(
+                            f"メッセージ送信時にエラーが発生しました: "
+                            f"channel_id={channel_id} error={error}"
+                        )
+                        delivery_failed = True
+                        break
 
-                    if channel:
-                        author_name, avatar_url, author_url = await resolve_author(
-                            session,
-                            handle,
-                            discord_id,
-                            atcoder_profile,
-                        )
-                        diff_text = (
-                            f"diff: {metadata['difficulty']}"
-                            if metadata["difficulty"] is not None
-                            else "diff: 判定不可"
-                        )
-                        embed = discord.Embed(
-                            title=metadata["title"] + " <:AC_bot:1342654382277398700>",
-                            url=metadata["problem_url"],
-                            description=f"[🔎提出]({metadata['submission_url']}) | "
-                            + diff_text
-                            + f" | {submission['language']}",
-                            color=metadata["color"],
-                        )
-                        embed.set_author(
-                            name=author_name,
-                            url=author_url,
-                            icon_url=avatar_url,
-                        )
-                        embed.set_footer(
-                            text=(
-                                "提出日時: "
-                                f"{datetime.datetime.fromtimestamp(submission_time, pytz.timezone('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S')}"
-                            )
-                        )
-                        try:
-                            await channel.send(embed=embed)
-                        except Exception as e:
-                            print(f"メッセージ送信時にエラーが発生しました: {e}")
-                            continue
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute(
+                        """
+                        UPDATE subscriptions
+                        SET last_submission_id = ?, last_checked_time = ?
+                        WHERE id = ?
+                        """,
+                        (submission["id"], submission_time, subscription["id"]),
+                    )
+                    conn.commit()
+                    conn.close()
 
-                        conn = get_db_connection()
-                        c = conn.cursor()
-                        c.execute(
-                            """
-                            UPDATE subscriptions
-                            SET last_submission_id = ?, last_checked_time = ?
-                            WHERE id = ?
-                            """,
-                            (submission["id"], submission_time, subscription["id"]),
-                        )
-                        conn.commit()
-                        conn.close()
+                    last_submission_id = submission["id"]
+                    last_checked_time = submission_time
 
-                        last_submission_id = submission["id"]
-                        last_checked_time = submission_time
-
-                if new_latest_time is not None and new_latest_time != last_checked_time:
+                if (
+                    not delivery_failed
+                    and new_latest_time is not None
+                    and new_latest_time != last_checked_time
+                ):
                     conn = get_db_connection()
                     c = conn.cursor()
                     c.execute(
@@ -389,4 +447,6 @@ async def on_ready():
         check_ac_submissions.start()
 
 
-bot.run(config["DISCORD"]["TOKEN"])
+if __name__ == "__main__":
+    init_db()
+    bot.run(config["DISCORD"]["TOKEN"])
