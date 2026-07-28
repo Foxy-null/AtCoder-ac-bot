@@ -49,3 +49,16 @@ def init_db(db_path=DB_PATH):
                 """
             )
         return True
+
+
+def delete_subscriptions_for_channel(channel_id, db_path=DB_PATH):
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.execute(
+            "DELETE FROM subscriptions WHERE channel_id = ?",
+            (channel_id,),
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()

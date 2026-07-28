@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from database import init_db
+from database import delete_subscriptions_for_channel, init_db
 
 
 class InitDbTest(unittest.TestCase):
@@ -47,6 +47,37 @@ class InitDbTest(unittest.TestCase):
                 ).fetchall()
 
             self.assertEqual(rows, [("alice", 2001)])
+
+    def test_deletes_every_subscription_for_one_channel(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO subscriptions (
+                        atcoder_handle,
+                        channel_id
+                    )
+                    VALUES (?, ?)
+                    """,
+                    [
+                        ("alice", 101),
+                        ("bob", 101),
+                        ("carol", 102),
+                    ],
+                )
+
+            self.assertEqual(
+                delete_subscriptions_for_channel(101, db_path),
+                2,
+            )
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT atcoder_handle, channel_id FROM subscriptions"
+                ).fetchall()
+
+            self.assertEqual(rows, [("carol", 102)])
 
 
 if __name__ == "__main__":
