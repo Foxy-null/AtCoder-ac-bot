@@ -38,6 +38,7 @@ UNREGISTER_STATUS = "アプデ: /unregisterで登録解除"
 
 
 intents = discord.Intents.default()
+intents.members = True
 intents.message_content = True
 
 bot = commands.Bot(
@@ -397,7 +398,7 @@ class UnregisterView(discord.ui.View):
             return "ユーザー未紐づけ"
         member = self.guild.get_member(discord_id)
         if member is None:
-            return f"Discord ID: {discord_id}"
+            return f"Discord ID: {discord_id}" if plain else f"<@{discord_id}>"
         return member.display_name if plain else member.mention
 
     def build_embed(self):

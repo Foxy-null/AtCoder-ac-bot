@@ -111,6 +111,11 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
                 embed.fields[2].value,
                 "通知先: <#101>\n共有登録（Discordユーザー未紐づけ）",
             )
+            self.assertEqual(view.owner_text(999), "<@999>")
+            self.assertEqual(
+                view.owner_text(999, plain=True),
+                "Discord ID: 999",
+            )
             self.assertIn(
                 "サーバー内の登録を管理",
                 [
@@ -126,6 +131,13 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
                 [row["id"] for row in view.records],
                 [1, 2, 3, 4, 5],
             )
+            select = next(
+                item
+                for item in view.children
+                if hasattr(item, "options")
+            )
+            bob = next(option for option in select.options if option.value == "3")
+            self.assertIn("user-2", bob.description)
 
     async def test_delete_keeps_owner_check(self):
         response = SimpleNamespace(edit_message=AsyncMock())
