@@ -81,6 +81,49 @@ def delete_subscriptions_for_channel(channel_id, db_path=DB_PATH):
         conn.close()
 
 
+def get_subscriptions_for_channels(channel_ids, db_path=DB_PATH):
+    channel_ids = tuple(channel_ids)
+    if not channel_ids:
+        return []
+
+    placeholders = ", ".join("?" for _ in channel_ids)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            f"""
+            SELECT id, discord_id, atcoder_handle, channel_id
+            FROM subscriptions
+            WHERE channel_id IN ({placeholders})
+            ORDER BY atcoder_handle COLLATE NOCASE, channel_id, id
+            """,
+            channel_ids,
+        ).fetchall()
+
+
+def delete_subscriptions(subscriptions, discord_id=None, db_path=DB_PATH):
+    subscriptions = tuple(subscriptions)
+    if not subscriptions:
+        return 0
+
+    if discord_id is None:
+        query = "DELETE FROM subscriptions WHERE id = ? AND channel_id = ?"
+        parameters = subscriptions
+    else:
+        query = (
+            "DELETE FROM subscriptions "
+            "WHERE id = ? AND channel_id = ? AND discord_id = ?"
+        )
+        parameters = [
+            (subscription_id, channel_id, discord_id)
+            for subscription_id, channel_id in subscriptions
+        ]
+
+    with sqlite3.connect(db_path) as conn:
+        before = conn.total_changes
+        conn.executemany(query, parameters)
+        return conn.total_changes - before
+
+
 def get_submission_poll_time(db_path=DB_PATH):
     with sqlite3.connect(db_path) as conn:
         return conn.execute(

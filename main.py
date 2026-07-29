@@ -15,7 +15,9 @@ import pytz
 
 from database import (
     DB_PATH,
+    delete_subscriptions,
     delete_subscriptions_for_channel,
+    get_subscriptions_for_channels,
     get_submission_poll_time,
     init_db,
     set_submission_poll_time,
@@ -31,12 +33,18 @@ ATCODER_SUBMISSIONS_URL = (
 )
 ATCODER_SUBMISSION_PAGE_LIMIT = 1000
 ATCODER_API_DELAY_SECONDS = 1.1
+UNREGISTER_PAGE_SIZE = 10
+UNREGISTER_STATUS = "アプデ: /unregisterで登録解除"
 
 
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    activity=discord.CustomActivity(name=UNREGISTER_STATUS),
+)
 
 config = configparser.ConfigParser()
 config.read("config.ini")
@@ -297,6 +305,395 @@ async def register(
     await interaction.response.send_message(
         f"{user_text} AtCoderのハンドル 「{atcoder_handle}」 を登録しました！\n"
         f"ACをした際の通知は {channel.mention} に送信されます。"
+    )
+
+
+class UnregisterConfirmationModal(discord.ui.Modal):
+    confirmation = discord.ui.TextInput(
+        label="確認のため「全件解除」と入力してください",
+        max_length=4,
+    )
+
+    def __init__(self, view, subscriptions):
+        super().__init__(title="サーバーの全登録を解除")
+        self.unregister_view = view
+        self.subscriptions = subscriptions
+
+    async def on_submit(self, interaction):
+        if self.confirmation.value != "全件解除":
+            await interaction.response.send_message(
+                "入力が一致しないため解除しませんでした。",
+                ephemeral=True,
+            )
+            return
+        await self.unregister_view.delete_confirmed(
+            interaction,
+            self.subscriptions,
+            administrator=True,
+        )
+
+
+class UnregisterView(discord.ui.View):
+    def __init__(self, interaction):
+        super().__init__(timeout=180)
+        self.user_id = interaction.user.id
+        self.member = interaction.user
+        self.guild = interaction.guild
+        self.mode = "self"
+        self.page = 0
+        self.selected_id = None
+        self.confirmation = None
+        self.records = []
+        self.reload()
+
+    @property
+    def is_manager(self):
+        return self.member.guild_permissions.manage_guild
+
+    def reload(self):
+        records = get_subscriptions_for_channels(
+            channel.id for channel in self.guild.channels
+        )
+        if self.mode == "self":
+            records = [
+                record
+                for record in records
+                if record["discord_id"] == self.user_id
+            ]
+        self.records = records
+        self.page = min(self.page, max(0, self.page_count - 1))
+        self.selected_id = None
+        self.confirmation = None
+        self.rebuild_items()
+
+    @property
+    def page_count(self):
+        return max(1, math.ceil(len(self.records) / UNREGISTER_PAGE_SIZE))
+
+    @property
+    def page_records(self):
+        start = self.page * UNREGISTER_PAGE_SIZE
+        return self.records[start : start + UNREGISTER_PAGE_SIZE]
+
+    def channel_text(self, channel_id, plain=False):
+        channel = self.guild.get_channel(channel_id)
+        if (
+            channel is not None
+            and channel.permissions_for(self.member).view_channel
+        ):
+            return f"#{channel.name}" if plain else channel.mention
+        return "閲覧権限のないチャンネル"
+
+    def owner_text(self, discord_id, plain=False):
+        if discord_id is None:
+            return "ユーザー未紐づけ"
+        member = self.guild.get_member(discord_id)
+        if member is None:
+            return f"Discord ID: {discord_id}"
+        return member.display_name if plain else member.mention
+
+    def build_embed(self):
+        if self.confirmation is not None:
+            label, subscriptions = self.confirmation
+            return discord.Embed(
+                title="登録解除の確認",
+                description=(
+                    f"{label}（{len(subscriptions)}件）を解除します。\n"
+                    "この操作は取り消せません。"
+                ),
+                color=discord.Color.red(),
+            )
+
+        title = (
+            "サーバー内の登録管理"
+            if self.mode == "admin"
+            else "登録解除"
+        )
+        if not self.records:
+            description = "対象の登録はありません。"
+        else:
+            description = "解除する登録を選択してください。"
+
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=discord.Color.blue(),
+        )
+        for record in self.page_records:
+            value = f"通知先: {self.channel_text(record['channel_id'])}"
+            if self.mode == "admin":
+                value += f"\nユーザー: {self.owner_text(record['discord_id'])}"
+            embed.add_field(
+                name=record["atcoder_handle"],
+                value=value,
+                inline=False,
+            )
+        if self.records:
+            embed.set_footer(
+                text=(
+                    f"{len(self.records)}件 "
+                    f"（{self.page + 1}/{self.page_count}ページ）"
+                )
+            )
+        return embed
+
+    def rebuild_items(self):
+        self.clear_items()
+
+        if self.confirmation is not None:
+            cancel = discord.ui.Button(
+                label="戻る",
+                style=discord.ButtonStyle.secondary,
+            )
+            cancel.callback = self.cancel_confirmation
+            self.add_item(cancel)
+
+            confirm = discord.ui.Button(
+                label="解除を確定",
+                style=discord.ButtonStyle.danger,
+            )
+            confirm.callback = self.confirm_delete
+            self.add_item(confirm)
+            return
+
+        if self.records:
+            options = []
+            for record in self.page_records:
+                channel = self.channel_text(record["channel_id"], plain=True)
+                description = f"通知先: {channel}"
+                if self.mode == "admin":
+                    owner = self.owner_text(record["discord_id"], plain=True)
+                    description += f" / {owner}"
+                options.append(
+                    discord.SelectOption(
+                        label=record["atcoder_handle"][:100],
+                        value=str(record["id"]),
+                        description=description[:100],
+                    )
+                )
+            select = discord.ui.Select(
+                placeholder="解除する登録を選択",
+                options=options,
+                row=0,
+            )
+            select.callback = self.select_subscription
+            self.add_item(select)
+
+            previous = discord.ui.Button(
+                label="前へ",
+                style=discord.ButtonStyle.secondary,
+                disabled=self.page == 0,
+                row=1,
+            )
+            previous.callback = self.previous_page
+            self.add_item(previous)
+
+            following = discord.ui.Button(
+                label="次へ",
+                style=discord.ButtonStyle.secondary,
+                disabled=self.page + 1 >= self.page_count,
+                row=1,
+            )
+            following.callback = self.next_page
+            self.add_item(following)
+
+            remove = discord.ui.Button(
+                label="選択した登録を解除",
+                style=discord.ButtonStyle.danger,
+                disabled=self.selected_id is None,
+                row=1,
+            )
+            remove.callback = self.confirm_selected
+            self.add_item(remove)
+
+            remove_all = discord.ui.Button(
+                label=(
+                    "このサーバーの全登録を解除"
+                    if self.mode == "admin"
+                    else "自分の登録をすべて解除"
+                ),
+                style=discord.ButtonStyle.danger,
+                row=2,
+            )
+            remove_all.callback = self.confirm_all
+            self.add_item(remove_all)
+
+        if self.mode == "admin":
+            back = discord.ui.Button(
+                label="自分の登録に戻る",
+                style=discord.ButtonStyle.secondary,
+                row=3,
+            )
+            back.callback = self.show_self
+            self.add_item(back)
+        elif self.is_manager:
+            admin = discord.ui.Button(
+                label="サーバー内の登録を管理",
+                style=discord.ButtonStyle.primary,
+                row=3,
+            )
+            admin.callback = self.show_admin
+            self.add_item(admin)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.user_id:
+            return True
+        await interaction.response.send_message(
+            "このメニューは操作できません。",
+            ephemeral=True,
+        )
+        return False
+
+    async def ensure_manager(self, interaction):
+        if interaction.user.guild_permissions.manage_guild:
+            return True
+        await interaction.response.send_message(
+            "サーバーの管理権限が必要です。",
+            ephemeral=True,
+        )
+        return False
+
+    async def select_subscription(self, interaction):
+        self.selected_id = int(interaction.data["values"][0])
+        self.rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.build_embed(),
+            view=self,
+        )
+
+    async def previous_page(self, interaction):
+        self.page -= 1
+        self.selected_id = None
+        self.rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.build_embed(),
+            view=self,
+        )
+
+    async def next_page(self, interaction):
+        self.page += 1
+        self.selected_id = None
+        self.rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.build_embed(),
+            view=self,
+        )
+
+    async def show_admin(self, interaction):
+        if not await self.ensure_manager(interaction):
+            return
+        self.mode = "admin"
+        self.page = 0
+        self.reload()
+        await interaction.response.edit_message(
+            embed=self.build_embed(),
+            view=self,
+        )
+
+    async def show_self(self, interaction):
+        self.mode = "self"
+        self.page = 0
+        self.reload()
+        await interaction.response.edit_message(
+            embed=self.build_embed(),
+            view=self,
+        )
+
+    async def confirm_selected(self, interaction):
+        selected = next(
+            (
+                record
+                for record in self.records
+                if record["id"] == self.selected_id
+            ),
+            None,
+        )
+        if selected is None:
+            await interaction.response.send_message(
+                "登録が見つかりません。メニューを開き直してください。",
+                ephemeral=True,
+            )
+            return
+        if self.mode == "admin" and not await self.ensure_manager(interaction):
+            return
+        self.confirmation = (
+            f"「{selected['atcoder_handle']}」の登録",
+            [(selected["id"], selected["channel_id"])],
+        )
+        self.rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.build_embed(),
+            view=self,
+        )
+
+    async def confirm_all(self, interaction):
+        subscriptions = [
+            (record["id"], record["channel_id"])
+            for record in self.records
+        ]
+        if self.mode == "admin":
+            if not await self.ensure_manager(interaction):
+                return
+            await interaction.response.send_modal(
+                UnregisterConfirmationModal(self, subscriptions)
+            )
+            return
+
+        self.confirmation = (
+            "自分の登録すべて",
+            subscriptions,
+        )
+        self.rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.build_embed(),
+            view=self,
+        )
+
+    async def cancel_confirmation(self, interaction):
+        self.confirmation = None
+        self.rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.build_embed(),
+            view=self,
+        )
+
+    async def confirm_delete(self, interaction):
+        _, subscriptions = self.confirmation
+        await self.delete_confirmed(
+            interaction,
+            subscriptions,
+            administrator=self.mode == "admin",
+        )
+
+    async def delete_confirmed(
+        self,
+        interaction,
+        subscriptions,
+        administrator,
+    ):
+        if administrator and not await self.ensure_manager(interaction):
+            return
+        deleted = delete_subscriptions(
+            subscriptions,
+            discord_id=None if administrator else self.user_id,
+        )
+        self.reload()
+        embed = self.build_embed()
+        embed.description = f"{deleted}件の登録を解除しました。"
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.tree.command(
+    name="unregister",
+    description="AC通知の登録を解除します",
+)
+@app_commands.guild_only()
+async def unregister(interaction: discord.Interaction):
+    view = UnregisterView(interaction)
+    await interaction.response.send_message(
+        embed=view.build_embed(),
+        view=view,
+        ephemeral=True,
     )
 
 

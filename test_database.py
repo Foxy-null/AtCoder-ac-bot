@@ -4,7 +4,9 @@ import unittest
 from pathlib import Path
 
 from database import (
+    delete_subscriptions,
     delete_subscriptions_for_channel,
+    get_subscriptions_for_channels,
     get_submission_poll_time,
     init_db,
     set_submission_poll_time,
@@ -112,6 +114,49 @@ class InitDbTest(unittest.TestCase):
 
             set_submission_poll_time(20001, db_path)
             self.assertEqual(get_submission_poll_time(db_path), 20001)
+
+    def test_lists_by_channel_and_deletes_only_the_owner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO subscriptions (
+                        discord_id,
+                        atcoder_handle,
+                        channel_id
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    [
+                        (1, "alice", 101),
+                        (2, "bob", 101),
+                        (1, "carol", 102),
+                        (None, "dave", 103),
+                    ],
+                )
+
+            rows = get_subscriptions_for_channels([101, 102], db_path)
+            self.assertEqual(
+                [
+                    (row["discord_id"], row["atcoder_handle"], row["channel_id"])
+                    for row in rows
+                ],
+                [(1, "alice", 101), (2, "bob", 101), (1, "carol", 102)],
+            )
+
+            targets = [(row["id"], row["channel_id"]) for row in rows]
+            self.assertEqual(delete_subscriptions(targets, 1, db_path), 2)
+
+            remaining = get_subscriptions_for_channels([101, 102, 103], db_path)
+            self.assertEqual(
+                [
+                    (row["discord_id"], row["atcoder_handle"])
+                    for row in remaining
+                ],
+                [(2, "bob"), (None, "dave")],
+            )
 
 
 if __name__ == "__main__":
