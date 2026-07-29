@@ -735,6 +735,19 @@ class UnregisterView(discord.ui.View):
         embed = self.build_embed()
         embed.description = f"{deleted}件の登録を解除しました。"
         await interaction.response.edit_message(embed=embed, view=self)
+        if deleted:
+            if len(subscriptions) == 1:
+                handle = records[subscriptions[0]]["atcoder_handle"]
+                message = (
+                    f"{interaction.user.mention} が AtCoderのハンドル "
+                    f"「{handle}」の登録を解除しました。"
+                )
+            else:
+                message = (
+                    f"{interaction.user.mention} がAC通知の登録を"
+                    f"{deleted}件解除しました。"
+                )
+            await interaction.followup.send(message, ephemeral=False)
 
 
 @bot.tree.command(

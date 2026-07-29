@@ -141,10 +141,12 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_delete_keeps_owner_check(self):
         response = SimpleNamespace(edit_message=AsyncMock())
+        followup = SimpleNamespace(send=AsyncMock())
         interaction = SimpleNamespace(
             user=self.user,
             guild=self.guild,
             response=response,
+            followup=followup,
         )
         with (
             patch.object(
@@ -167,13 +169,19 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
             unlinked_only=False,
         )
         response.edit_message.assert_awaited_once()
+        followup.send.assert_awaited_once_with(
+            "<@1> が AtCoderのハンドル 「alice」の登録を解除しました。",
+            ephemeral=False,
+        )
 
     async def test_shared_delete_requires_record_to_remain_unlinked(self):
         response = SimpleNamespace(edit_message=AsyncMock())
+        followup = SimpleNamespace(send=AsyncMock())
         interaction = SimpleNamespace(
             user=self.user,
             guild=self.guild,
             response=response,
+            followup=followup,
         )
         with (
             patch.object(
@@ -198,6 +206,10 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
             unlinked_only=True,
         )
         log.assert_called_once()
+        followup.send.assert_awaited_once_with(
+            "<@1> が AtCoderのハンドル 「dave」の登録を解除しました。",
+            ephemeral=False,
+        )
 
     async def test_self_bulk_delete_excludes_shared_records(self):
         response = SimpleNamespace(edit_message=AsyncMock())
