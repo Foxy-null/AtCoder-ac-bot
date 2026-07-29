@@ -78,9 +78,21 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
                 "atcoder_handle": "bob",
                 "channel_id": 101,
             },
+            {
+                "id": 4,
+                "discord_id": None,
+                "atcoder_handle": "dave",
+                "channel_id": 101,
+            },
+            {
+                "id": 5,
+                "discord_id": None,
+                "atcoder_handle": "eve",
+                "channel_id": 102,
+            },
         ]
 
-    async def test_filters_self_masks_private_channel_and_allows_admin_view(self):
+    async def test_shows_self_and_visible_shared_records(self):
         with patch.object(
             main,
             "get_subscriptions_for_channels",
@@ -88,12 +100,16 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
         ):
             view = main.UnregisterView(self.interaction)
 
-            self.assertEqual([row["id"] for row in view.records], [1, 2])
+            self.assertEqual([row["id"] for row in view.records], [1, 2, 4])
             embed = view.build_embed()
             self.assertEqual(embed.fields[0].value, "通知先: <#101>")
             self.assertEqual(
                 embed.fields[1].value,
                 "通知先: 閲覧権限のないチャンネル",
+            )
+            self.assertEqual(
+                embed.fields[2].value,
+                "通知先: <#101>\n共有登録（Discordユーザー未紐づけ）",
             )
             self.assertIn(
                 "サーバー内の登録を管理",
@@ -106,7 +122,10 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
 
             view.mode = "admin"
             view.reload()
-            self.assertEqual([row["id"] for row in view.records], [1, 2, 3])
+            self.assertEqual(
+                [row["id"] for row in view.records],
+                [1, 2, 3, 4, 5],
+            )
 
     async def test_delete_keeps_owner_check(self):
         response = SimpleNamespace(edit_message=AsyncMock())
@@ -130,7 +149,89 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
                 administrator=False,
             )
 
-        delete.assert_called_once_with([(1, 101)], discord_id=1)
+        delete.assert_called_once_with(
+            [(1, 101)],
+            discord_id=1,
+            unlinked_only=False,
+        )
+        response.edit_message.assert_awaited_once()
+
+    async def test_shared_delete_requires_record_to_remain_unlinked(self):
+        response = SimpleNamespace(edit_message=AsyncMock())
+        interaction = SimpleNamespace(
+            user=self.user,
+            guild=self.guild,
+            response=response,
+        )
+        with (
+            patch.object(
+                main,
+                "get_subscriptions_for_channels",
+                return_value=self.records,
+            ),
+            patch.object(main, "delete_subscriptions", return_value=1) as delete,
+            patch("builtins.print") as log,
+        ):
+            view = main.UnregisterView(self.interaction)
+            await view.delete_confirmed(
+                interaction,
+                [(4, 101)],
+                administrator=False,
+                unlinked=True,
+            )
+
+        delete.assert_called_once_with(
+            [(4, 101)],
+            discord_id=1,
+            unlinked_only=True,
+        )
+        log.assert_called_once()
+
+    async def test_self_bulk_delete_excludes_shared_records(self):
+        response = SimpleNamespace(edit_message=AsyncMock())
+        interaction = SimpleNamespace(
+            user=self.user,
+            guild=self.guild,
+            response=response,
+        )
+        with patch.object(
+            main,
+            "get_subscriptions_for_channels",
+            return_value=self.records,
+        ):
+            view = main.UnregisterView(self.interaction)
+            await view.confirm_all(interaction)
+
+        self.assertEqual(
+            view.confirmation,
+            ("自分の登録すべて", [(1, 101), (2, 102)], False),
+        )
+
+    async def test_shared_delete_rechecks_channel_visibility(self):
+        response = SimpleNamespace(edit_message=AsyncMock())
+        interaction = SimpleNamespace(
+            user=self.user,
+            guild=self.guild,
+            response=response,
+        )
+        with (
+            patch.object(
+                main,
+                "get_subscriptions_for_channels",
+                return_value=self.records,
+            ),
+            patch.object(main, "delete_subscriptions") as delete,
+        ):
+            view = main.UnregisterView(self.interaction)
+            self.guild.get_channel(101).visible = False
+            await view.delete_confirmed(
+                interaction,
+                [(4, 101)],
+                administrator=False,
+                unlinked=True,
+            )
+
+        delete.assert_not_called()
         response.edit_message.assert_awaited_once()
 
     async def test_admin_delete_rechecks_permission(self):

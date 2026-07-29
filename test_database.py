@@ -158,6 +158,27 @@ class InitDbTest(unittest.TestCase):
                 [(2, "bob"), (None, "dave")],
             )
 
+            targets = [
+                (row["id"], row["channel_id"])
+                for row in remaining
+            ]
+            self.assertEqual(
+                delete_subscriptions(
+                    targets,
+                    db_path=db_path,
+                    unlinked_only=True,
+                ),
+                1,
+            )
+            remaining = get_subscriptions_for_channels([101, 102, 103], db_path)
+            self.assertEqual(
+                [
+                    (row["discord_id"], row["atcoder_handle"])
+                    for row in remaining
+                ],
+                [(2, "bob")],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

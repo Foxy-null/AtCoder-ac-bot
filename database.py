@@ -100,12 +100,23 @@ def get_subscriptions_for_channels(channel_ids, db_path=DB_PATH):
         ).fetchall()
 
 
-def delete_subscriptions(subscriptions, discord_id=None, db_path=DB_PATH):
+def delete_subscriptions(
+    subscriptions,
+    discord_id=None,
+    db_path=DB_PATH,
+    unlinked_only=False,
+):
     subscriptions = tuple(subscriptions)
     if not subscriptions:
         return 0
 
-    if discord_id is None:
+    if unlinked_only:
+        query = (
+            "DELETE FROM subscriptions "
+            "WHERE id = ? AND channel_id = ? AND discord_id IS NULL"
+        )
+        parameters = subscriptions
+    elif discord_id is None:
         query = "DELETE FROM subscriptions WHERE id = ? AND channel_id = ?"
         parameters = subscriptions
     else:

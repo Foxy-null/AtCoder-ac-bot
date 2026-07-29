@@ -359,6 +359,10 @@ class UnregisterView(discord.ui.View):
                 record
                 for record in records
                 if record["discord_id"] == self.user_id
+                or (
+                    record["discord_id"] is None
+                    and self.can_view_channel(record["channel_id"])
+                )
             ]
         self.records = records
         self.page = min(self.page, max(0, self.page_count - 1))
@@ -375,12 +379,16 @@ class UnregisterView(discord.ui.View):
         start = self.page * UNREGISTER_PAGE_SIZE
         return self.records[start : start + UNREGISTER_PAGE_SIZE]
 
+    def can_view_channel(self, channel_id, member=None):
+        channel = self.guild.get_channel(channel_id)
+        return bool(
+            channel
+            and channel.permissions_for(member or self.member).view_channel
+        )
+
     def channel_text(self, channel_id, plain=False):
         channel = self.guild.get_channel(channel_id)
-        if (
-            channel is not None
-            and channel.permissions_for(self.member).view_channel
-        ):
+        if self.can_view_channel(channel_id):
             return f"#{channel.name}" if plain else channel.mention
         return "閲覧権限のないチャンネル"
 
@@ -394,7 +402,7 @@ class UnregisterView(discord.ui.View):
 
     def build_embed(self):
         if self.confirmation is not None:
-            label, subscriptions = self.confirmation
+            label, subscriptions, _ = self.confirmation
             return discord.Embed(
                 title="登録解除の確認",
                 description=(
@@ -423,6 +431,8 @@ class UnregisterView(discord.ui.View):
             value = f"通知先: {self.channel_text(record['channel_id'])}"
             if self.mode == "admin":
                 value += f"\nユーザー: {self.owner_text(record['discord_id'])}"
+            elif record["discord_id"] is None:
+                value += "\n共有登録（Discordユーザー未紐づけ）"
             embed.add_field(
                 name=record["atcoder_handle"],
                 value=value,
@@ -464,6 +474,8 @@ class UnregisterView(discord.ui.View):
                 if self.mode == "admin":
                     owner = self.owner_text(record["discord_id"], plain=True)
                     description += f" / {owner}"
+                elif record["discord_id"] is None:
+                    description += " / 共有登録"
                 options.append(
                     discord.SelectOption(
                         label=record["atcoder_handle"][:100],
@@ -506,17 +518,21 @@ class UnregisterView(discord.ui.View):
             remove.callback = self.confirm_selected
             self.add_item(remove)
 
-            remove_all = discord.ui.Button(
-                label=(
-                    "このサーバーの全登録を解除"
-                    if self.mode == "admin"
-                    else "自分の登録をすべて解除"
-                ),
-                style=discord.ButtonStyle.danger,
-                row=2,
-            )
-            remove_all.callback = self.confirm_all
-            self.add_item(remove_all)
+            if self.mode == "admin" or any(
+                record["discord_id"] == self.user_id
+                for record in self.records
+            ):
+                remove_all = discord.ui.Button(
+                    label=(
+                        "このサーバーの全登録を解除"
+                        if self.mode == "admin"
+                        else "自分の登録をすべて解除"
+                    ),
+                    style=discord.ButtonStyle.danger,
+                    row=2,
+                )
+                remove_all.callback = self.confirm_all
+                self.add_item(remove_all)
 
         if self.mode == "admin":
             back = discord.ui.Button(
@@ -617,8 +633,13 @@ class UnregisterView(discord.ui.View):
         if self.mode == "admin" and not await self.ensure_manager(interaction):
             return
         self.confirmation = (
-            f"「{selected['atcoder_handle']}」の登録",
+            (
+                f"「{selected['atcoder_handle']}」の共有登録"
+                if self.mode == "self" and selected["discord_id"] is None
+                else f"「{selected['atcoder_handle']}」の登録"
+            ),
             [(selected["id"], selected["channel_id"])],
+            self.mode == "self" and selected["discord_id"] is None,
         )
         self.rebuild_items()
         await interaction.response.edit_message(
@@ -627,9 +648,16 @@ class UnregisterView(discord.ui.View):
         )
 
     async def confirm_all(self, interaction):
+        records = self.records
+        if self.mode == "self":
+            records = [
+                record
+                for record in records
+                if record["discord_id"] == self.user_id
+            ]
         subscriptions = [
             (record["id"], record["channel_id"])
-            for record in self.records
+            for record in records
         ]
         if self.mode == "admin":
             if not await self.ensure_manager(interaction):
@@ -642,6 +670,7 @@ class UnregisterView(discord.ui.View):
         self.confirmation = (
             "自分の登録すべて",
             subscriptions,
+            False,
         )
         self.rebuild_items()
         await interaction.response.edit_message(
@@ -658,11 +687,12 @@ class UnregisterView(discord.ui.View):
         )
 
     async def confirm_delete(self, interaction):
-        _, subscriptions = self.confirmation
+        _, subscriptions, unlinked = self.confirmation
         await self.delete_confirmed(
             interaction,
             subscriptions,
             administrator=self.mode == "admin",
+            unlinked=unlinked,
         )
 
     async def delete_confirmed(
@@ -670,13 +700,36 @@ class UnregisterView(discord.ui.View):
         interaction,
         subscriptions,
         administrator,
+        unlinked=False,
     ):
         if administrator and not await self.ensure_manager(interaction):
             return
+        if unlinked and not all(
+            self.can_view_channel(channel_id, interaction.user)
+            for _, channel_id in subscriptions
+        ):
+            self.reload()
+            embed = self.build_embed()
+            embed.description = "通知先チャンネルの閲覧権限が必要です。"
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+        records = {
+            (record["id"], record["channel_id"]): record
+            for record in self.records
+        }
         deleted = delete_subscriptions(
             subscriptions,
             discord_id=None if administrator else self.user_id,
+            unlinked_only=unlinked,
         )
+        if unlinked and deleted:
+            record = records[subscriptions[0]]
+            print(
+                "共有登録を解除しました: "
+                f"actor_id={interaction.user.id} "
+                f"atcoder_handle={record['atcoder_handle']} "
+                f"channel_id={record['channel_id']}"
+            )
         self.reload()
         embed = self.build_embed()
         embed.description = f"{deleted}件の登録を解除しました。"
