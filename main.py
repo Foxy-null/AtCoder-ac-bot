@@ -56,6 +56,8 @@ def get_db_connection():
 
 
 def can_send_notifications(channel):
+    if isinstance(channel, discord.DMChannel):
+        return True
     permissions = channel.permissions_for(channel.guild.me)
     return (
         permissions.view_channel
@@ -257,17 +259,26 @@ def build_submission_urls(handle, submission):
 
 
 @bot.tree.command(name="register", description="問題をACした際の通知を登録します")
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
 @app_commands.describe(
     user="紐づけるDiscordユーザー（省略可）",
-    channel="通知を送信するチャンネル",
+    channel="通知を送信するチャンネル（省略時は現在のチャンネル）",
     atcoder_handle="登録したいAtCoderハンドル",
 )
 async def register(
     interaction: discord.Interaction,
     atcoder_handle: str,
-    channel: discord.TextChannel,
+    channel: discord.TextChannel | None = None,
     user: discord.User | None = None,
 ):
+    channel = channel or interaction.channel
+    if not isinstance(channel, (discord.TextChannel, discord.DMChannel)):
+        await interaction.response.send_message(
+            "このチャンネルは通知先に指定できません。",
+            ephemeral=True,
+        )
+        return
+
     if not can_send_notifications(channel):
         await interaction.response.send_message(
             "Botに通知の送信・埋め込み権限がないため登録できません。",
@@ -305,7 +316,9 @@ async def register(
 
     await interaction.response.send_message(
         f"{user_text} AtCoderのハンドル 「{atcoder_handle}」 を登録しました！\n"
-        f"ACをした際の通知は {channel.mention} に送信されます。"
+        "ACをした際の通知は "
+        f"{channel.mention if isinstance(channel, discord.TextChannel) else 'このDM'} "
+        "に送信されます。"
     )
 
 
@@ -340,6 +353,7 @@ class UnregisterView(discord.ui.View):
         self.user_id = interaction.user.id
         self.member = interaction.user
         self.guild = interaction.guild
+        self.channel_id = interaction.channel.id if self.guild is None else None
         self.mode = "self"
         self.page = 0
         self.selected_id = None
@@ -349,13 +363,20 @@ class UnregisterView(discord.ui.View):
 
     @property
     def is_manager(self):
-        return self.member.guild_permissions.manage_guild
+        return bool(
+            self.guild and self.member.guild_permissions.manage_guild
+        )
 
     def reload(self):
-        records = get_subscriptions_for_channels(
-            channel.id for channel in self.guild.channels
+        channel_ids = (
+            [self.channel_id]
+            if self.guild is None
+            else (channel.id for channel in self.guild.channels)
         )
-        if self.mode == "self":
+        records = get_subscriptions_for_channels(
+            channel_ids
+        )
+        if self.mode == "self" and self.guild is not None:
             records = [
                 record
                 for record in records
@@ -381,6 +402,8 @@ class UnregisterView(discord.ui.View):
         return self.records[start : start + UNREGISTER_PAGE_SIZE]
 
     def can_view_channel(self, channel_id, member=None):
+        if self.guild is None:
+            return channel_id == self.channel_id
         channel = self.guild.get_channel(channel_id)
         return bool(
             channel
@@ -388,6 +411,8 @@ class UnregisterView(discord.ui.View):
         )
 
     def channel_text(self, channel_id, plain=False):
+        if self.guild is None:
+            return "このDM"
         channel = self.guild.get_channel(channel_id)
         if self.can_view_channel(channel_id):
             return f"#{channel.name}" if plain else channel.mention
@@ -519,7 +544,7 @@ class UnregisterView(discord.ui.View):
             remove.callback = self.confirm_selected
             self.add_item(remove)
 
-            if self.mode == "admin" or any(
+            if self.guild is None or self.mode == "admin" or any(
                 record["discord_id"] == self.user_id
                 for record in self.records
             ):
@@ -527,7 +552,11 @@ class UnregisterView(discord.ui.View):
                     label=(
                         "このサーバーの全登録を解除"
                         if self.mode == "admin"
-                        else "自分の登録をすべて解除"
+                        else (
+                            "このDMの全登録を解除"
+                            if self.guild is None
+                            else "自分の登録をすべて解除"
+                        )
                     ),
                     style=discord.ButtonStyle.danger,
                     row=2,
@@ -650,7 +679,7 @@ class UnregisterView(discord.ui.View):
 
     async def confirm_all(self, interaction):
         records = self.records
-        if self.mode == "self":
+        if self.mode == "self" and self.guild is not None:
             records = [
                 record
                 for record in records
@@ -669,7 +698,11 @@ class UnregisterView(discord.ui.View):
             return
 
         self.confirmation = (
-            "自分の登録すべて",
+            (
+                "このDMの登録すべて"
+                if self.guild is None
+                else "自分の登録すべて"
+            ),
             subscriptions,
             False,
         )
@@ -720,7 +753,11 @@ class UnregisterView(discord.ui.View):
         }
         deleted = delete_subscriptions(
             subscriptions,
-            discord_id=None if administrator else self.user_id,
+            discord_id=(
+                None
+                if administrator or self.guild is None
+                else self.user_id
+            ),
             unlinked_only=unlinked,
         )
         if unlinked and deleted:
@@ -754,7 +791,7 @@ class UnregisterView(discord.ui.View):
     name="unregister",
     description="AC通知の登録を解除します",
 )
-@app_commands.guild_only()
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
 async def unregister(interaction: discord.Interaction):
     view = UnregisterView(interaction)
     await interaction.response.send_message(

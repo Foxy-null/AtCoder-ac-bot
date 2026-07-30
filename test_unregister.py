@@ -1,7 +1,8 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import discord
 import main
 
 
@@ -257,6 +258,61 @@ class UnregisterViewTest(unittest.IsolatedAsyncioTestCase):
 
         delete.assert_not_called()
         response.edit_message.assert_awaited_once()
+
+    async def test_opens_unregister_menu_for_current_dm(self):
+        channel = Mock(spec=discord.DMChannel)
+        channel.id = 201
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=1, mention="<@1>"),
+            guild=None,
+            channel=channel,
+            response=SimpleNamespace(send_message=AsyncMock()),
+        )
+        records = [
+            {
+                "id": 1,
+                "discord_id": 2,
+                "atcoder_handle": "alice",
+                "channel_id": 201,
+            }
+        ]
+        delete_interaction = SimpleNamespace(
+            user=interaction.user,
+            response=SimpleNamespace(edit_message=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        with (
+            patch.object(
+                main,
+                "get_subscriptions_for_channels",
+                return_value=records,
+            ) as get_subscriptions,
+            patch.object(
+                main,
+                "delete_subscriptions",
+                return_value=1,
+            ) as delete,
+        ):
+            await main.unregister.callback(interaction)
+            view = interaction.response.send_message.await_args.kwargs["view"]
+            await view.delete_confirmed(
+                delete_interaction,
+                [(1, 201)],
+                administrator=False,
+            )
+
+        get_subscriptions.assert_called_with([201])
+        self.assertEqual(view.records, records)
+        self.assertEqual(
+            view.build_embed().fields[0].value,
+            "通知先: このDM",
+        )
+        delete.assert_called_once_with(
+            [(1, 201)],
+            discord_id=None,
+            unlinked_only=False,
+        )
 
     async def test_admin_delete_rechecks_permission(self):
         response = SimpleNamespace(
