@@ -1,4 +1,7 @@
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -26,6 +29,35 @@ def discord_error(error_type, status):
 
 
 class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
+    async def test_registers_current_dm_when_channel_is_omitted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            main.init_db(db_path)
+            channel = Mock(spec=discord.DMChannel)
+            channel.id = 101
+            interaction = SimpleNamespace(
+                channel=channel,
+                guild=None,
+                response=SimpleNamespace(send_message=AsyncMock()),
+            )
+
+            with patch.object(main, "DB_PATH", db_path):
+                await main.register.callback(interaction, "alice")
+
+            with sqlite3.connect(db_path) as conn:
+                row = conn.execute(
+                    """
+                    SELECT discord_id, atcoder_handle, channel_id
+                    FROM subscriptions
+                    """
+                ).fetchone()
+
+        self.assertEqual(row, (None, "alice", 101))
+        interaction.response.send_message.assert_awaited_once_with(
+            "Discordユーザーなしで AtCoderのハンドル 「alice」 を登録しました！\n"
+            "ACをした際の通知は このDM に送信されます。"
+        )
+
     async def test_checks_each_channel_once(self):
         channel = channel_with_permissions()
         with (

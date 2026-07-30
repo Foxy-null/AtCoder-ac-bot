@@ -1,7 +1,7 @@
 # Quick Start 🚀
 
 1. サーバーに[BOT](https://discord.com/oauth2/authorize?client_id=1342526334529835048&permissions=280576&integration_type=0&scope=bot)を招待
-2. `/register`コマンドを使用して「AtCoderハンドル・通知を送信するチャンネル」を指定し、必要ならDiscordユーザーもあわせて登録する
+2. サーバーまたはBOTのDMで`/register`コマンドを使用する（通知先チャンネルを省略するとコマンドを実行したチャンネルに通知）
 3. 登録を解除する場合は`/unregister`コマンドから対象を選択する
 
 # Manual Setup (Self hosted)
