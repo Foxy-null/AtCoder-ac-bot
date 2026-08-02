@@ -1,4 +1,8 @@
 import unittest
+import sqlite3
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import main
@@ -27,6 +31,14 @@ class Session:
     def get(self, url):
         self.urls.append(url)
         return Response(next(self.pages))
+
+
+class ClientSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
 
 
 def submission(submission_id, epoch_second, user_id="alice"):
@@ -96,6 +108,77 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(grouped, {"alice": [alice]})
+
+    async def test_retries_waiting_submission_until_it_becomes_ac(self):
+        waiting = {
+            **submission(1, 101),
+            "contest_id": "abc001",
+            "problem_id": "abc001_a",
+            "language": "Python",
+            "result": "WJ",
+        }
+        accepted = {**waiting, "result": "AC"}
+        unrelated = submission(2, 102, "bob")
+        poll_time = 100
+        channel = SimpleNamespace(send=AsyncMock())
+
+        def get_poll_time():
+            return poll_time
+
+        def set_poll_time(value):
+            nonlocal poll_time
+            poll_time = value
+
+        async def populate_catalog(session, cache):
+            cache["problems"] = {("abc001", "abc001_a"): "A"}
+            cache["difficulty"] = {}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            main.init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO subscriptions (
+                        atcoder_handle,
+                        channel_id,
+                        last_checked_time
+                    )
+                    VALUES ('alice', 10, 100)
+                    """
+                )
+
+            fetch = AsyncMock(side_effect=[[waiting, unrelated], [accepted]])
+            with (
+                patch.object(main, "DB_PATH", db_path),
+                patch.object(main.aiohttp, "ClientSession", ClientSession),
+                patch.object(main, "get_submission_poll_time", get_poll_time),
+                patch.object(main, "set_submission_poll_time", set_poll_time),
+                patch.object(main, "fetch_submissions_since", fetch),
+                patch.object(
+                    main,
+                    "get_accessible_channels",
+                    new=AsyncMock(return_value=({10: channel}, set())),
+                ),
+                patch.object(main, "get_problem_catalog", populate_catalog),
+                patch.object(
+                    main,
+                    "resolve_author",
+                    new=AsyncMock(return_value=("Alice", "avatar", "profile")),
+                ),
+            ):
+                await main.check_ac_submissions.coro()
+                self.assertEqual(poll_time, 101)
+                channel.send.assert_not_awaited()
+
+                await main.check_ac_submissions.coro()
+
+        self.assertEqual(poll_time, 101)
+        channel.send.assert_awaited_once()
+        self.assertEqual(
+            [call.args[1] for call in fetch.await_args_list],
+            [100, 101],
+        )
 
 
 if __name__ == "__main__":

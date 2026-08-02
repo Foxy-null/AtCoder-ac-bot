@@ -889,6 +889,9 @@ async def check_ac_submissions():
             subscriptions_by_handle,
         )
         batch_failed = bool(retry_channel_ids)
+        # ponytail: a registered WJ holds the global cursor; store pending IDs
+        # separately if delayed judging makes replay volume expensive.
+        pending_submission_time = None
 
         for handle, subscriptions in subscriptions_by_handle.items():
             handle_submissions = submissions_by_handle.get(handle, ())
@@ -921,6 +924,14 @@ async def check_ac_submissions():
                         continue
                     if new_latest_time is None or submission_time > new_latest_time:
                         new_latest_time = submission_time
+
+                    if submission["result"] == "WJ":
+                        if (
+                            pending_submission_time is None
+                            or submission_time < pending_submission_time
+                        ):
+                            pending_submission_time = submission_time
+                        break
 
                     if submission["result"] != "AC":
                         continue
@@ -1018,7 +1029,10 @@ async def check_ac_submissions():
                     conn.close()
 
         if not batch_failed and submissions:
-            set_submission_poll_time(submissions[-1]["epoch_second"])
+            next_poll_time = submissions[-1]["epoch_second"]
+            if pending_submission_time is not None:
+                next_poll_time = min(next_poll_time, pending_submission_time)
+            set_submission_poll_time(next_poll_time)
 
 
 @bot.event
