@@ -1,7 +1,9 @@
 import sqlite3
+import time
 
 
 DB_PATH = "bot.db"
+SUBMISSION_LOOKBACK_SECONDS = 10 * 24 * 60 * 60
 
 
 def init_db(db_path=DB_PATH):
@@ -65,6 +67,29 @@ def init_db(db_path=DB_PATH):
             FROM subscriptions
             """
         )
+        notified_created = "notified_submissions" not in tables
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notified_submissions (
+                subscription_id INTEGER NOT NULL,
+                submission_id INTEGER NOT NULL,
+                PRIMARY KEY (subscription_id, submission_id)
+            )
+            """
+        )
+        if notified_created:
+            cutoff = int(time.time()) - SUBMISSION_LOOKBACK_SECONDS
+            conn.execute(
+                """
+                UPDATE subscriptions
+                SET last_checked_time = MIN(
+                    COALESCE(last_checked_time, ?),
+                    ?
+                )
+                WHERE last_submission_id IS NOT NULL
+                """,
+                (cutoff, cutoff),
+            )
         return created
 
 
