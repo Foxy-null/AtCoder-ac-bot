@@ -22,6 +22,9 @@ class Response:
     async def json(self):
         return self.submissions
 
+    async def text(self):
+        return self.submissions
+
 
 class Session:
     def __init__(self, pages):
@@ -50,6 +53,16 @@ def submission(submission_id, epoch_second, user_id="alice"):
 
 
 class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
+    async def test_fetches_and_normalizes_problem_title(self):
+        session = Session(
+            ["<title>A-Final - Trees &amp; Queries - System Test</title>"]
+        )
+
+        result = await main.fetch_problem_title(session, "problem-url")
+
+        self.assertEqual(result, "A-Final. Trees & Queries - System Test")
+        self.assertEqual(session.urls, ["problem-url"])
+
     async def test_fetches_one_batch(self):
         session = Session([[submission(1, 101)]])
 
