@@ -1,6 +1,7 @@
 import asyncio
 import configparser
 import datetime
+import html
 import math
 import re
 import sqlite3
@@ -238,6 +239,21 @@ async def get_problem_catalog(session, cache):
                     cache["difficulty"] = {}
         except Exception:
             cache["difficulty"] = {}
+
+
+async def fetch_problem_title(session, problem_url):
+    try:
+        async with session.get(problem_url) as resp:
+            if resp.status != 200:
+                return None
+            page = await resp.text()
+    except Exception:
+        return None
+
+    match = re.search(r"<title>\s*(.*?)\s*</title>", page, re.DOTALL)
+    if match is None:
+        return None
+    return html.unescape(match.group(1)).replace(" - ", ". ", 1)
 
 
 def build_submission_urls(handle, submission):
@@ -849,10 +865,15 @@ async def check_ac_submissions():
             await get_problem_catalog(session, catalog_cache)
             contest_id = submission["contest_id"]
             problem_id = submission["problem_id"]
-            problem_title = catalog_cache["problems"].get(
-                (contest_id, problem_id),
-                f"{contest_id} {problem_id}",
-            )
+            problem_key = (contest_id, problem_id)
+            urls = build_submission_urls(submission["atcoder_handle"], submission)
+            problem_title = catalog_cache["problems"].get(problem_key)
+            if problem_title is None:
+                problem_title = (
+                    await fetch_problem_title(session, urls["problem_url"])
+                    or f"{contest_id} {problem_id}"
+                )
+                catalog_cache["problems"][problem_key] = problem_title
 
             problem_difficulty = catalog_cache["difficulty"].get(problem_id)
             difficulty = 0
@@ -870,7 +891,7 @@ async def check_ac_submissions():
                 "title": problem_title,
                 "difficulty": difficulty,
                 "color": difficulty_to_color(difficulty),
-                **build_submission_urls(submission["atcoder_handle"], submission),
+                **urls,
             }
             submission_cache[submission_id] = cached
             return cached
