@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import main
 
@@ -53,10 +53,22 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
     async def test_fetches_one_batch(self):
         session = Session([[submission(1, 101)]])
 
-        result = await main.fetch_submissions_since(session, 100)
+        result = await main.fetch_user_submissions_since(
+            session,
+            "alice",
+            100,
+        )
 
         self.assertEqual(result, [submission(1, 101)])
-        self.assertEqual(session.urls, [main.ATCODER_SUBMISSIONS_URL.format(from_second=100)])
+        self.assertEqual(
+            session.urls,
+            [
+                main.ATCODER_USER_SUBMISSIONS_URL.format(
+                    handle="alice",
+                    from_second=100,
+                )
+            ],
+        )
 
     async def test_paginates_and_deduplicates_boundary(self):
         pages = [
@@ -69,7 +81,11 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "ATCODER_SUBMISSION_PAGE_LIMIT", 2),
             patch.object(main.asyncio, "sleep", new=AsyncMock()) as sleep,
         ):
-            result = await main.fetch_submissions_since(session, 100)
+            result = await main.fetch_user_submissions_since(
+                session,
+                "alice",
+                100,
+            )
 
         self.assertEqual(
             result,
@@ -82,9 +98,18 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             session.urls,
             [
-                main.ATCODER_SUBMISSIONS_URL.format(from_second=100),
-                main.ATCODER_SUBMISSIONS_URL.format(from_second=102),
-                main.ATCODER_SUBMISSIONS_URL.format(from_second=103),
+                main.ATCODER_USER_SUBMISSIONS_URL.format(
+                    handle="alice",
+                    from_second=100,
+                ),
+                main.ATCODER_USER_SUBMISSIONS_URL.format(
+                    handle="alice",
+                    from_second=102,
+                ),
+                main.ATCODER_USER_SUBMISSIONS_URL.format(
+                    handle="alice",
+                    from_second=103,
+                ),
             ],
         )
         self.assertEqual(sleep.await_count, 2)
@@ -94,40 +119,27 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
             [[submission(1, 100), submission(2, 100)]]
         )
         with patch.object(main, "ATCODER_SUBMISSION_PAGE_LIMIT", 2):
-            result = await main.fetch_submissions_since(session, 100)
+            result = await main.fetch_user_submissions_since(
+                session,
+                "alice",
+                100,
+            )
 
         self.assertIsNone(result)
 
-    def test_groups_only_registered_handles_case_insensitively(self):
-        alice = submission(1, 101, "Alice")
-        bob = submission(2, 102, "bob")
-
-        grouped = main.group_registered_submissions(
-            [alice, bob],
-            ["ALICE"],
-        )
-
-        self.assertEqual(grouped, {"alice": [alice]})
-
-    async def test_retries_waiting_submission_until_it_becomes_ac(self):
-        waiting = {
-            **submission(1, 101),
+    async def test_retries_send_and_notifies_late_lower_id_once(self):
+        high = {
+            **submission(200, 102),
             "contest_id": "abc001",
             "problem_id": "abc001_a",
             "language": "Python",
-            "result": "WJ",
+            "result": "AC",
         }
+        waiting = {**high, "id": 100, "epoch_second": 101, "result": "WJ"}
         accepted = {**waiting, "result": "AC"}
-        unrelated = submission(2, 102, "bob")
-        poll_time = 100
-        channel = SimpleNamespace(send=AsyncMock())
-
-        def get_poll_time():
-            return poll_time
-
-        def set_poll_time(value):
-            nonlocal poll_time
-            poll_time = value
+        channel = SimpleNamespace(
+            send=AsyncMock(side_effect=[RuntimeError("down"), None, None])
+        )
 
         async def populate_catalog(session, cache):
             cache["problems"] = {("abc001", "abc001_a"): "A"}
@@ -140,21 +152,33 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
                 conn.execute(
                     """
                     INSERT INTO subscriptions (
+                        discord_id,
                         atcoder_handle,
                         channel_id,
+                        last_submission_id,
                         last_checked_time
                     )
-                    VALUES ('alice', 10, 100)
+                    VALUES (1, 'alice', 10, 50, 100)
                     """
                 )
 
-            fetch = AsyncMock(side_effect=[[waiting, unrelated], [accepted]])
+            fetch = AsyncMock(
+                side_effect=[
+                    [high],
+                    [waiting, high],
+                    [accepted, high],
+                    [accepted, high],
+                ]
+            )
             with (
                 patch.object(main, "DB_PATH", db_path),
                 patch.object(main.aiohttp, "ClientSession", ClientSession),
-                patch.object(main, "get_submission_poll_time", get_poll_time),
-                patch.object(main, "set_submission_poll_time", set_poll_time),
-                patch.object(main, "fetch_submissions_since", fetch),
+                patch.object(
+                    main.time,
+                    "time",
+                    return_value=main.SUBMISSION_LOOKBACK_SECONDS + 100,
+                ),
+                patch.object(main, "fetch_user_submissions_since", fetch),
                 patch.object(
                     main,
                     "get_accessible_channels",
@@ -168,16 +192,31 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
                 ),
             ):
                 await main.check_ac_submissions.coro()
-                self.assertEqual(poll_time, 101)
-                channel.send.assert_not_awaited()
-
+                await main.check_ac_submissions.coro()
+                await main.check_ac_submissions.coro()
                 await main.check_ac_submissions.coro()
 
-        self.assertEqual(poll_time, 101)
-        channel.send.assert_awaited_once()
+            with sqlite3.connect(db_path) as conn:
+                notified = conn.execute(
+                    """
+                    SELECT submission_id
+                    FROM notified_submissions
+                    ORDER BY submission_id
+                    """
+                ).fetchall()
+                legacy_cursor = conn.execute(
+                    """
+                    SELECT last_submission_id, last_checked_time
+                    FROM subscriptions
+                    """
+                ).fetchone()
+
+        self.assertEqual(channel.send.await_count, 3)
+        self.assertEqual(notified, [(100,), (200,)])
+        self.assertEqual(legacy_cursor, (50, 100))
         self.assertEqual(
-            [call.args[1] for call in fetch.await_args_list],
-            [100, 101],
+            [call.args for call in fetch.await_args_list],
+            [(ANY, "alice", 100)] * 4,
         )
 
 

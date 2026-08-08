@@ -15,12 +15,11 @@ import pytz
 
 from database import (
     DB_PATH,
+    SUBMISSION_LOOKBACK_SECONDS,
     delete_subscriptions,
     delete_subscriptions_for_channel,
     get_subscriptions_for_channels,
-    get_submission_poll_time,
     init_db,
-    set_submission_poll_time,
 )
 
 
@@ -28,10 +27,11 @@ ATCODER_PROFILE_URL = "https://atcoder.jp/users/{handle}"
 ATCODER_AVATAR_URL = "https://img.atcoder.jp/assets/icon/avatar.png"
 ATCODER_PROBLEMS_URL = "https://kenkoooo.com/atcoder/resources/problems.json"
 ATCODER_DIFFICULTY_URL = "https://kenkoooo.com/atcoder/resources/problem-models.json"
-ATCODER_SUBMISSIONS_URL = (
-    "https://kenkoooo.com/atcoder/atcoder-api/v3/from/{from_second}"
+ATCODER_USER_SUBMISSIONS_URL = (
+    "https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions"
+    "?user={handle}&from_second={from_second}"
 )
-ATCODER_SUBMISSION_PAGE_LIMIT = 1000
+ATCODER_SUBMISSION_PAGE_LIMIT = 500
 ATCODER_API_DELAY_SECONDS = 1.1
 UNREGISTER_PAGE_SIZE = 10
 UNREGISTER_STATUS = "アプデ: /unregisterで登録解除"
@@ -101,12 +101,15 @@ async def get_accessible_channels(channel_ids):
     return channels, retry_channel_ids
 
 
-async def fetch_submissions_since(session, from_second):
+async def fetch_user_submissions_since(session, handle, from_second):
     submissions = {}
     cursor = from_second
 
     while True:
-        url = ATCODER_SUBMISSIONS_URL.format(from_second=cursor)
+        url = ATCODER_USER_SUBMISSIONS_URL.format(
+            handle=handle,
+            from_second=cursor,
+        )
         try:
             async with session.get(url) as response:
                 if response.status != 200:
@@ -132,8 +135,8 @@ async def fetch_submissions_since(session, from_second):
 
         next_cursor = max(submission["epoch_second"] for submission in page)
         if next_cursor <= cursor:
-            # ponytail: the upstream API cannot paginate over 1000 submissions
-            # in one second; keep the cursor unchanged rather than lose data.
+            # ponytail: the upstream API cannot paginate a full page from one
+            # second; keep the cursor unchanged rather than lose data.
             print(
                 "提出一覧を安全にページングできません: "
                 f"from_second={cursor} count={len(page)}"
@@ -142,16 +145,6 @@ async def fetch_submissions_since(session, from_second):
 
         cursor = next_cursor
         await asyncio.sleep(ATCODER_API_DELAY_SECONDS)
-
-
-def group_registered_submissions(submissions, handles):
-    registered = {handle.lower() for handle in handles}
-    grouped = defaultdict(list)
-    for submission in submissions:
-        handle = submission["user_id"].lower()
-        if handle in registered:
-            grouped[handle].append(submission)
-    return grouped
 
 
 def difficulty_to_color(difficulty):
@@ -812,19 +805,21 @@ async def check_ac_submissions():
         """
     )
     rows = c.fetchall()
+    notified_submissions = set(
+        c.execute(
+            "SELECT subscription_id, submission_id FROM notified_submissions"
+        ).fetchall()
+    )
     conn.close()
 
     if not rows:
-        set_submission_poll_time(int(time.time()))
         return
 
-    channels, retry_channel_ids = await get_accessible_channels(
+    channels, _ = await get_accessible_channels(
         row[3] for row in rows
     )
     rows = [row for row in rows if row[3] in channels]
     if not rows:
-        if not retry_channel_ids:
-            set_submission_poll_time(int(time.time()))
         return
 
     subscriptions_by_handle = defaultdict(list)
@@ -880,21 +875,24 @@ async def check_ac_submissions():
             submission_cache[submission_id] = cached
             return cached
 
-        from_second = get_submission_poll_time()
-        submissions = await fetch_submissions_since(session, from_second)
-        if submissions is None:
-            return
-        submissions_by_handle = group_registered_submissions(
-            submissions,
-            subscriptions_by_handle,
-        )
-        batch_failed = bool(retry_channel_ids)
-        # ponytail: a registered WJ holds the global cursor; store pending IDs
-        # separately if delayed judging makes replay volume expensive.
-        pending_submission_time = None
-
+        # ponytail: 10-day reconciliation window; extend it if upstream lag
+        # ever exceeds the window.
+        lookback_start = int(time.time()) - SUBMISSION_LOOKBACK_SECONDS
         for handle, subscriptions in subscriptions_by_handle.items():
-            handle_submissions = submissions_by_handle.get(handle, ())
+            from_second = max(
+                lookback_start,
+                min(
+                    subscription["last_checked_time"] or lookback_start
+                    for subscription in subscriptions
+                ),
+            )
+            handle_submissions = await fetch_user_submissions_since(
+                session,
+                handle,
+                from_second,
+            )
+            if handle_submissions is None:
+                continue
             if not handle_submissions:
                 continue
             atcoder_profile = None
@@ -911,27 +909,15 @@ async def check_ac_submissions():
                 if channel is None:
                     continue
                 last_submission_id = subscription["last_submission_id"]
-                last_checked_time = subscription["last_checked_time"]
-                new_latest_time = last_checked_time
-                delivery_failed = False
+                notification_start = max(
+                    lookback_start,
+                    subscription["last_checked_time"] or lookback_start,
+                )
 
                 for submission in handle_submissions:
                     submission_time = submission["epoch_second"]
-                    if (
-                        last_checked_time is not None
-                        and submission_time < last_checked_time
-                    ):
+                    if submission_time < notification_start:
                         continue
-                    if new_latest_time is None or submission_time > new_latest_time:
-                        new_latest_time = submission_time
-
-                    if submission["result"] == "WJ":
-                        if (
-                            pending_submission_time is None
-                            or submission_time < pending_submission_time
-                        ):
-                            pending_submission_time = submission_time
-                        break
 
                     if submission["result"] != "AC":
                         continue
@@ -940,6 +926,12 @@ async def check_ac_submissions():
                         last_submission_id is not None
                         and submission["id"] <= last_submission_id
                     ):
+                        continue
+                    notification_key = (
+                        subscription["id"],
+                        submission["id"],
+                    )
+                    if notification_key in notified_submissions:
                         continue
 
                     metadata = await get_submission_metadata(
@@ -983,56 +975,29 @@ async def check_ac_submissions():
                     except (discord.Forbidden, discord.NotFound) as error:
                         unregister_channel(channel_id, error)
                         channels.pop(channel_id, None)
-                        delivery_failed = True
                         break
                     except Exception as error:
                         print(
                             f"メッセージ送信時にエラーが発生しました: "
                             f"channel_id={channel_id} error={error}"
                         )
-                        delivery_failed = True
-                        batch_failed = True
                         break
 
                     conn = get_db_connection()
                     c = conn.cursor()
                     c.execute(
                         """
-                        UPDATE subscriptions
-                        SET last_submission_id = ?, last_checked_time = ?
-                        WHERE id = ?
+                        INSERT OR IGNORE INTO notified_submissions (
+                            subscription_id,
+                            submission_id
+                        )
+                        VALUES (?, ?)
                         """,
-                        (submission["id"], submission_time, subscription["id"]),
+                        notification_key,
                     )
                     conn.commit()
                     conn.close()
-
-                    last_submission_id = submission["id"]
-                    last_checked_time = submission_time
-
-                if (
-                    not delivery_failed
-                    and new_latest_time is not None
-                    and new_latest_time != last_checked_time
-                ):
-                    conn = get_db_connection()
-                    c = conn.cursor()
-                    c.execute(
-                        """
-                        UPDATE subscriptions
-                        SET last_checked_time = ?
-                        WHERE id = ?
-                        """,
-                        (new_latest_time, subscription["id"]),
-                    )
-                    conn.commit()
-                    conn.close()
-
-        if not batch_failed and submissions:
-            next_poll_time = submissions[-1]["epoch_second"]
-            if pending_submission_time is not None:
-                next_poll_time = min(next_poll_time, pending_submission_time)
-            set_submission_poll_time(next_poll_time)
+                    notified_submissions.add(notification_key)
 
 
 @bot.event

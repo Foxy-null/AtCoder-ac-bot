@@ -2,7 +2,9 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import database
 from database import (
     delete_subscriptions,
     delete_subscriptions_for_channel,
@@ -114,6 +116,47 @@ class InitDbTest(unittest.TestCase):
 
             set_submission_poll_time(20001, db_path)
             self.assertEqual(get_submission_poll_time(db_path), 20001)
+
+    def test_rewinds_existing_delivery_cursor_once_for_reconciliation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("DROP TABLE notified_submissions")
+                conn.executemany(
+                    """
+                    INSERT INTO subscriptions (
+                        atcoder_handle,
+                        channel_id,
+                        last_submission_id,
+                        last_checked_time
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [
+                        ("alice", 101, 50, 200),
+                        ("bob", 102, None, 200),
+                    ],
+                )
+
+            with patch.object(
+                database.time,
+                "time",
+                return_value=database.SUBMISSION_LOOKBACK_SECONDS + 100,
+            ):
+                init_db(db_path)
+                init_db(db_path)
+
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT atcoder_handle, last_checked_time
+                    FROM subscriptions
+                    ORDER BY atcoder_handle
+                    """
+                ).fetchall()
+
+            self.assertEqual(rows, [("alice", 100), ("bob", 200)])
 
     def test_lists_by_channel_and_deletes_only_the_owner(self):
         with tempfile.TemporaryDirectory() as temp_dir:
