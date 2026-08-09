@@ -34,6 +34,7 @@ ATCODER_USER_SUBMISSIONS_URL = (
 )
 ATCODER_SUBMISSION_PAGE_LIMIT = 500
 ATCODER_API_DELAY_SECONDS = 1.1
+PROBLEM_CATALOG_WAIT_SECONDS = 3 * 24 * 60 * 60
 UNREGISTER_PAGE_SIZE = 10
 UNREGISTER_STATUS = "アプデ: /unregisterで登録解除"
 
@@ -855,6 +856,7 @@ async def check_ac_submissions():
     async with aiohttp.ClientSession() as session:
         catalog_cache = {"problems": None, "difficulty": None}
         submission_cache = {}
+        current_time = int(time.time())
 
         async def get_submission_metadata(submission):
             submission_id = submission["id"]
@@ -868,29 +870,32 @@ async def check_ac_submissions():
             problem_key = (contest_id, problem_id)
             urls = build_submission_urls(submission["atcoder_handle"], submission)
             problem_title = catalog_cache["problems"].get(problem_key)
+            problem_difficulty = catalog_cache["difficulty"].get(problem_id)
+            diff = (
+                problem_difficulty.get("difficulty")
+                if isinstance(problem_difficulty, dict)
+                else None
+            )
+            if (
+                problem_title is None or diff is None
+            ) and submission["epoch_second"] > (
+                current_time - PROBLEM_CATALOG_WAIT_SECONDS
+            ):
+                return None
+
             if problem_title is None:
                 problem_title = (
                     await fetch_problem_title(session, urls["problem_url"])
                     or f"{contest_id} {problem_id}"
                 )
-                catalog_cache["problems"][problem_key] = problem_title
 
-            problem_difficulty = catalog_cache["difficulty"].get(problem_id)
-            difficulty = 0
-            if (
-                problem_difficulty
-                and isinstance(problem_difficulty, dict)
-                and "difficulty" in problem_difficulty
-            ):
-                diff = problem_difficulty["difficulty"]
-                if diff is not None and diff <= 400:
-                    diff = int(400.0 / math.exp((400.0 - diff) / 400.0))
-                difficulty = diff if diff is not None else 0
+            if diff is not None and diff <= 400:
+                diff = int(400.0 / math.exp((400.0 - diff) / 400.0))
 
             cached = {
                 "title": problem_title,
-                "difficulty": difficulty,
-                "color": difficulty_to_color(difficulty),
+                "difficulty": diff,
+                "color": difficulty_to_color(diff),
                 **urls,
             }
             submission_cache[submission_id] = cached
@@ -898,7 +903,7 @@ async def check_ac_submissions():
 
         # ponytail: 10-day reconciliation window; extend it if upstream lag
         # ever exceeds the window.
-        lookback_start = int(time.time()) - SUBMISSION_LOOKBACK_SECONDS
+        lookback_start = current_time - SUBMISSION_LOOKBACK_SECONDS
         for handle, subscriptions in subscriptions_by_handle.items():
             from_second = max(
                 lookback_start,
@@ -961,6 +966,8 @@ async def check_ac_submissions():
                             "atcoder_handle": subscription["atcoder_handle"],
                         }
                     )
+                    if metadata is None:
+                        continue
                     author_name, avatar_url, author_url = await resolve_author(
                         session,
                         subscription["atcoder_handle"],

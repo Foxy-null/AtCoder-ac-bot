@@ -155,7 +155,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         )
 
         async def populate_catalog(session, cache):
-            cache["problems"] = {("abc001", "abc001_a"): "A"}
+            cache["problems"] = {}
             cache["difficulty"] = {}
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -225,12 +225,99 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
                 ).fetchone()
 
         self.assertEqual(channel.send.await_count, 3)
+        last_embed = channel.send.await_args_list[-1].kwargs["embed"]
+        self.assertTrue(last_embed.title.startswith("abc001 abc001_a"))
+        self.assertIn("diff: 判定不可", last_embed.description)
         self.assertEqual(notified, [(100,), (200,)])
         self.assertEqual(legacy_cursor, (50, 100))
         self.assertEqual(
             [call.args for call in fetch.await_args_list],
             [(ANY, "alice", 100)] * 4,
         )
+
+    async def test_waits_until_title_and_difficulty_are_available(self):
+        accepted = {
+            **submission(100, 1000),
+            "contest_id": "abc001",
+            "problem_id": "abc001_a",
+            "language": "Python",
+            "result": "AC",
+        }
+        channel = SimpleNamespace(send=AsyncMock())
+        catalogs = iter(
+            [
+                ({}, {"abc001_a": {"difficulty": 800}}),
+                ({("abc001", "abc001_a"): "A"}, {}),
+                (
+                    {("abc001", "abc001_a"): "A"},
+                    {"abc001_a": {"difficulty": 800}},
+                ),
+            ]
+        )
+
+        async def populate_catalog(session, cache):
+            cache["problems"], cache["difficulty"] = next(catalogs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            main.init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO subscriptions (
+                        discord_id,
+                        atcoder_handle,
+                        channel_id,
+                        last_checked_time
+                    )
+                    VALUES (1, 'alice', 10, 900)
+                    """
+                )
+
+            with (
+                patch.object(main, "DB_PATH", db_path),
+                patch.object(main.aiohttp, "ClientSession", ClientSession),
+                patch.object(
+                    main.time,
+                    "time",
+                    return_value=(
+                        1000 + main.PROBLEM_CATALOG_WAIT_SECONDS - 1
+                    ),
+                ),
+                patch.object(
+                    main,
+                    "fetch_user_submissions_since",
+                    new=AsyncMock(return_value=[accepted]),
+                ),
+                patch.object(
+                    main,
+                    "get_accessible_channels",
+                    new=AsyncMock(return_value=({10: channel}, set())),
+                ),
+                patch.object(main, "get_problem_catalog", populate_catalog),
+                patch.object(
+                    main,
+                    "resolve_author",
+                    new=AsyncMock(return_value=("Alice", "avatar", "profile")),
+                ),
+            ):
+                await main.check_ac_submissions.coro()
+                await main.check_ac_submissions.coro()
+                channel.send.assert_not_awaited()
+
+                await main.check_ac_submissions.coro()
+
+            with sqlite3.connect(db_path) as conn:
+                notified = conn.execute(
+                    "SELECT submission_id FROM notified_submissions"
+                ).fetchall()
+
+        channel.send.assert_awaited_once()
+        self.assertIn(
+            "diff: 800",
+            channel.send.await_args.kwargs["embed"].description,
+        )
+        self.assertEqual(notified, [(100,)])
 
 
 if __name__ == "__main__":
