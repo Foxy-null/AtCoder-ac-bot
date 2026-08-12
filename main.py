@@ -314,6 +314,10 @@ async def register(
 
     conn = get_db_connection()
     c = conn.cursor()
+    exists = c.execute(
+        "SELECT 1 FROM subscriptions WHERE atcoder_handle = ? AND channel_id = ?",
+        (atcoder_handle, channel_id),
+    ).fetchone() is not None
     c.execute(
         """
         INSERT INTO subscriptions (
@@ -339,17 +343,23 @@ async def register(
     conn.commit()
     conn.close()
 
-    if user:
-        user_text = f"{user.mention} に"
-    else:
-        user_text = "Discordユーザーなしで"
-
-    await interaction.response.send_message(
-        f"{user_text} AtCoderのハンドル 「{atcoder_handle}」 を登録しました！\n"
-        f"{'ACと不正解' if notify_wrong_answers else 'ACをした際'}の通知は "
-        f"{channel.mention if isinstance(channel, discord.TextChannel) else 'このDM'} "
-        "に送信されます。"
+    destination = (
+        channel.mention if isinstance(channel, discord.TextChannel) else "このDM"
     )
+    if exists:
+        await interaction.response.send_message(
+            f"AtCoderのハンドル 「{atcoder_handle}」 の既存登録を更新しました！\n"
+            f"Discordユーザー: {user.mention if user else 'なし'}\n"
+            f"通知対象: {'ACと不正解' if notify_wrong_answers else 'ACのみ'}\n"
+            f"通知先: {destination}"
+        )
+    else:
+        user_text = f"{user.mention} に" if user else "Discordユーザーなしで"
+        await interaction.response.send_message(
+            f"{user_text} AtCoderのハンドル 「{atcoder_handle}」 を登録しました！\n"
+            f"{'ACと不正解' if notify_wrong_answers else 'ACをした際'}の通知は "
+            f"{destination} に送信されます。"
+        )
 
 
 class UnregisterConfirmationModal(discord.ui.Modal):
