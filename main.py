@@ -1008,7 +1008,7 @@ async def check_ac_submissions():
                     embed = discord.Embed(
                         title=(
                             metadata["title"]
-                            + f" {RESULT_EMOJIS.get(result, f'[{result}]')}"
+                            + f" [{result}] {RESULT_EMOJIS.get(result, '')}"
                         ),
                         url=metadata["problem_url"],
                         description=f"[🔎提出]({metadata['submission_url']}) | "
