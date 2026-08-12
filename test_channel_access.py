@@ -28,18 +28,49 @@ def discord_error(error_type, status):
     return error_type(response, {"message": "test", "code": 0})
 
 
+class HttpClient:
+    def __init__(self, status=200):
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    def get(self, url):
+        return self
+
+
+def register_interaction(channel):
+    return SimpleNamespace(
+        channel=channel,
+        response=SimpleNamespace(
+            send_message=AsyncMock(),
+            defer=AsyncMock(),
+        ),
+        edit_original_response=AsyncMock(),
+    )
+
+
 class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.session = HttpClient()
+        self.client_session_patch = patch.object(
+            main.aiohttp,
+            "ClientSession",
+            return_value=self.session,
+        )
+        self.client_session_patch.start()
+        self.addCleanup(self.client_session_patch.stop)
+
     async def test_registers_current_dm_when_channel_is_omitted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "bot.db"
             main.init_db(db_path)
             channel = Mock(spec=discord.DMChannel)
             channel.id = 101
-            interaction = SimpleNamespace(
-                channel=channel,
-                guild=None,
-                response=SimpleNamespace(send_message=AsyncMock()),
-            )
+            interaction = register_interaction(channel)
 
             with patch.object(main, "DB_PATH", db_path):
                 await main.register.callback(interaction, "alice")
@@ -54,9 +85,12 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
                 ).fetchone()
 
         self.assertEqual(row, (None, "alice", 101, 0))
-        interaction.response.send_message.assert_awaited_once_with(
-            "Discordユーザーなしで AtCoderのハンドル 「alice」 を登録しました！\n"
-            "ACをした際の通知は このDM に送信されます。"
+        interaction.response.defer.assert_awaited_once_with(thinking=True)
+        interaction.edit_original_response.assert_awaited_once_with(
+            content=(
+                "Discordユーザーなしで AtCoderのハンドル 「alice」 を登録しました！\n"
+                "ACをした際の通知は このDM に送信されます。"
+            )
         )
 
     async def test_registers_wrong_answer_notifications(self):
@@ -65,11 +99,7 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
             main.init_db(db_path)
             channel = Mock(spec=discord.DMChannel)
             channel.id = 101
-            interaction = SimpleNamespace(
-                channel=channel,
-                guild=None,
-                response=SimpleNamespace(send_message=AsyncMock()),
-            )
+            interaction = register_interaction(channel)
 
             with patch.object(main, "DB_PATH", db_path):
                 await main.register.callback(
@@ -86,7 +116,7 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enabled, 1)
         self.assertIn(
             "ACと不正解の通知は このDM に送信されます。",
-            interaction.response.send_message.await_args.args[0],
+            interaction.edit_original_response.await_args.kwargs["content"],
         )
 
     async def test_updates_existing_registration_and_reports_all_settings(self):
@@ -106,11 +136,7 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
                 )
             channel = Mock(spec=discord.DMChannel)
             channel.id = 101
-            interaction = SimpleNamespace(
-                channel=channel,
-                guild=None,
-                response=SimpleNamespace(send_message=AsyncMock()),
-            )
+            interaction = register_interaction(channel)
 
             with patch.object(main, "DB_PATH", db_path):
                 await main.register.callback(interaction, "alice")
@@ -124,11 +150,60 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
                 ).fetchall()
 
         self.assertEqual(rows, [(None, 0)])
-        interaction.response.send_message.assert_awaited_once_with(
-            "AtCoderのハンドル 「alice」 の既存登録を更新しました！\n"
-            "Discordユーザー: なし\n"
-            "通知対象: ACのみ\n"
-            "通知先: このDM"
+        interaction.edit_original_response.assert_awaited_once_with(
+            content=(
+                "AtCoderのハンドル 「alice」 の既存登録を更新しました！\n"
+                "Discordユーザー: なし\n"
+                "通知対象: ACのみ\n"
+                "通知先: このDM"
+            )
+        )
+
+    async def test_rejects_nonexistent_atcoder_handle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            main.init_db(db_path)
+            self.session.status = 404
+            channel = Mock(spec=discord.DMChannel)
+            channel.id = 101
+            interaction = register_interaction(channel)
+
+            with patch.object(main, "DB_PATH", db_path):
+                await main.register.callback(interaction, "missing-user")
+
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM subscriptions"
+                ).fetchone()[0]
+
+        self.assertEqual(count, 0)
+        interaction.edit_original_response.assert_awaited_once_with(
+            content="AtCoderのハンドル 「missing-user」 は存在しません。"
+        )
+
+    async def test_does_not_register_when_atcoder_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            main.init_db(db_path)
+            self.session.status = 500
+            channel = Mock(spec=discord.DMChannel)
+            channel.id = 101
+            interaction = register_interaction(channel)
+
+            with patch.object(main, "DB_PATH", db_path):
+                await main.register.callback(interaction, "alice")
+
+            with sqlite3.connect(db_path) as conn:
+                count = conn.execute(
+                    "SELECT COUNT(*) FROM subscriptions"
+                ).fetchone()[0]
+
+        self.assertEqual(count, 0)
+        interaction.edit_original_response.assert_awaited_once_with(
+            content=(
+                "AtCoderユーザーを確認できませんでした。"
+                "時間をおいて再試行してください。"
+            )
         )
 
     async def test_checks_each_channel_once(self):
