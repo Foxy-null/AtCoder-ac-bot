@@ -302,7 +302,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         ac_only_channel.send.assert_not_awaited()
         all_results_channel.send.assert_awaited_once()
         embed = all_results_channel.send.await_args.kwargs["embed"]
-        self.assertEqual(embed.title, "A")
+        self.assertEqual(embed.title, "A <:WA:1537153868134096976>")
         self.assertEqual(
             embed.footer.text,
             "提出日時: 1970-01-01 09:01:41 | Wrong Answer",

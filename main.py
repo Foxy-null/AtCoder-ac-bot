@@ -47,6 +47,16 @@ RESULT_NAMES = {
     "TLE": "Time Limit Exceeded",
     "WA": "Wrong Answer",
 }
+RESULT_EMOJIS = {
+    "AC": "<:AC:1537153851843411989>",
+    "CE": "<:CE:1537153874048065667>",
+    "IE": "<:IE:1537153860894982224>",
+    "MLE": "<:MLE:1537153883325857863>",
+    "OLE": "<:OLE:1537153863151517777>",
+    "RE": "<:RE:1537153876145471580>",
+    "TLE": "<:TLE:1537153881300148345>",
+    "WA": "<:WA:1537153868134096976>",
+}
 
 
 intents = discord.Intents.default()
@@ -1016,7 +1026,7 @@ async def check_ac_submissions():
                         else "diff: 判定不可"
                     )
                     embed = discord.Embed(
-                        title=metadata["title"],
+                        title=f"{metadata['title']} {RESULT_EMOJIS.get(result, '')}",
                         url=metadata["problem_url"],
                         description=f"[🔎提出]({metadata['submission_url']}) | "
                         + diff_text
