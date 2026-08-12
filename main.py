@@ -37,6 +37,16 @@ ATCODER_API_DELAY_SECONDS = 1.1
 PROBLEM_CATALOG_WAIT_SECONDS = 3 * 24 * 60 * 60
 UNREGISTER_PAGE_SIZE = 10
 UNREGISTER_STATUS = "アプデ: /unregisterで登録解除"
+RESULT_EMOJIS = {
+    "AC": "<:AC:1537131915596005560>",
+    "CE": "<:CE:1537132282626711562>",
+    "IE": "<:IE:1537132192134725633>",
+    "MLE": "<:MLE:1537132380366700646>",
+    "OLE": "<:OLE:1537132116725334077>",
+    "RE": "<:RE:1537132563649536050>",
+    "TLE": "<:TLE:1537132456774336553>",
+    "WA": "<:WA:1537131999503057027>",
+}
 
 
 intents = discord.Intents.default()
@@ -998,11 +1008,7 @@ async def check_ac_submissions():
                     embed = discord.Embed(
                         title=(
                             metadata["title"]
-                            + (
-                                " <:AC_bot:1342654382277398700>"
-                                if result == "AC"
-                                else f" [{result}]"
-                            )
+                            + f" {RESULT_EMOJIS.get(result, f'[{result}]')}"
                         ),
                         url=metadata["problem_url"],
                         description=f"[🔎提出]({metadata['submission_url']}) | "

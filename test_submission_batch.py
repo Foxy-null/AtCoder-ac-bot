@@ -301,10 +301,9 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
 
         ac_only_channel.send.assert_not_awaited()
         all_results_channel.send.assert_awaited_once()
-        self.assertTrue(
-            all_results_channel.send.await_args.kwargs["embed"].title.endswith(
-                "[WA]"
-            )
+        self.assertEqual(
+            all_results_channel.send.await_args.kwargs["embed"].title,
+            "A <:WA:1537131999503057027>",
         )
 
     async def test_waits_until_title_and_difficulty_are_available(self):
