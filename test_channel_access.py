@@ -47,15 +47,46 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
             with sqlite3.connect(db_path) as conn:
                 row = conn.execute(
                     """
-                    SELECT discord_id, atcoder_handle, channel_id
+                    SELECT discord_id, atcoder_handle, channel_id,
+                           notify_wrong_answers
                     FROM subscriptions
                     """
                 ).fetchone()
 
-        self.assertEqual(row, (None, "alice", 101))
+        self.assertEqual(row, (None, "alice", 101, 0))
         interaction.response.send_message.assert_awaited_once_with(
             "Discordユーザーなしで AtCoderのハンドル 「alice」 を登録しました！\n"
             "ACをした際の通知は このDM に送信されます。"
+        )
+
+    async def test_registers_wrong_answer_notifications(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            main.init_db(db_path)
+            channel = Mock(spec=discord.DMChannel)
+            channel.id = 101
+            interaction = SimpleNamespace(
+                channel=channel,
+                guild=None,
+                response=SimpleNamespace(send_message=AsyncMock()),
+            )
+
+            with patch.object(main, "DB_PATH", db_path):
+                await main.register.callback(
+                    interaction,
+                    "alice",
+                    notify_wrong_answers=True,
+                )
+
+            with sqlite3.connect(db_path) as conn:
+                enabled = conn.execute(
+                    "SELECT notify_wrong_answers FROM subscriptions"
+                ).fetchone()[0]
+
+        self.assertEqual(enabled, 1)
+        self.assertIn(
+            "ACと不正解の通知は このDM に送信されます。",
+            interaction.response.send_message.await_args.args[0],
         )
 
     async def test_checks_each_channel_once(self):

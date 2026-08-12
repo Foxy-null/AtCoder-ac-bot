@@ -16,6 +16,37 @@ from database import (
 
 
 class InitDbTest(unittest.TestCase):
+    def test_adds_wrong_answer_option_to_existing_subscriptions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE subscriptions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        discord_id INTEGER,
+                        atcoder_handle TEXT NOT NULL,
+                        channel_id INTEGER NOT NULL,
+                        last_submission_id INTEGER,
+                        last_checked_time INTEGER,
+                        UNIQUE(atcoder_handle, channel_id)
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO subscriptions (atcoder_handle, channel_id) "
+                    "VALUES ('alice', 101)"
+                )
+
+            init_db(db_path)
+
+            with sqlite3.connect(db_path) as conn:
+                value = conn.execute(
+                    "SELECT notify_wrong_answers FROM subscriptions"
+                ).fetchone()[0]
+
+            self.assertEqual(value, 0)
+
     def test_migrates_users_only_when_subscriptions_is_created(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "bot.db"
