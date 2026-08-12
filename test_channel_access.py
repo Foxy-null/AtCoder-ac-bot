@@ -89,6 +89,48 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
             interaction.response.send_message.await_args.args[0],
         )
 
+    async def test_updates_existing_registration_and_reports_all_settings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            main.init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO subscriptions (
+                        discord_id, atcoder_handle, channel_id,
+                        notify_wrong_answers
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (1, "alice", 101, True),
+                )
+            channel = Mock(spec=discord.DMChannel)
+            channel.id = 101
+            interaction = SimpleNamespace(
+                channel=channel,
+                guild=None,
+                response=SimpleNamespace(send_message=AsyncMock()),
+            )
+
+            with patch.object(main, "DB_PATH", db_path):
+                await main.register.callback(interaction, "alice")
+
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT discord_id, notify_wrong_answers
+                    FROM subscriptions
+                    """
+                ).fetchall()
+
+        self.assertEqual(rows, [(None, 0)])
+        interaction.response.send_message.assert_awaited_once_with(
+            "AtCoderのハンドル 「alice」 の既存登録を更新しました！\n"
+            "Discordユーザー: なし\n"
+            "通知対象: ACのみ\n"
+            "通知先: このDM"
+        )
+
     async def test_checks_each_channel_once(self):
         channel = channel_with_permissions()
         with (
