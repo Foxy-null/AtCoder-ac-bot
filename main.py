@@ -37,15 +37,15 @@ ATCODER_API_DELAY_SECONDS = 1.1
 PROBLEM_CATALOG_WAIT_SECONDS = 3 * 24 * 60 * 60
 UNREGISTER_PAGE_SIZE = 10
 UNREGISTER_STATUS = "アプデ: /unregisterで登録解除"
-RESULT_EMOJIS = {
-    "AC": "<:AC:1537153851843411989>",
-    "CE": "<:CE:1537153874048065667>",
-    "IE": "<:IE:1537153860894982224>",
-    "MLE": "<:MLE:1537153883325857863>",
-    "OLE": "<:OLE:1537153863151517777>",
-    "RE": "<:RE:1537153876145471580>",
-    "TLE": "<:TLE:1537153881300148345>",
-    "WA": "<:WA:1537153868134096976>",
+RESULT_NAMES = {
+    "AC": "Accepted",
+    "CE": "Compilation Error",
+    "IE": "Internal Error",
+    "MLE": "Memory Limit Exceeded",
+    "OLE": "Output Limit Exceeded",
+    "RE": "Runtime Error",
+    "TLE": "Time Limit Exceeded",
+    "WA": "Wrong Answer",
 }
 
 
@@ -1016,10 +1016,7 @@ async def check_ac_submissions():
                         else "diff: 判定不可"
                     )
                     embed = discord.Embed(
-                        title=(
-                            metadata["title"]
-                            + f" [{result}] {RESULT_EMOJIS.get(result, '')}"
-                        ),
+                        title=metadata["title"],
                         url=metadata["problem_url"],
                         description=f"[🔎提出]({metadata['submission_url']}) | "
                         + diff_text
@@ -1035,6 +1032,7 @@ async def check_ac_submissions():
                         text=(
                             "提出日時: "
                             f"{datetime.datetime.fromtimestamp(submission_time, pytz.timezone('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S')}"
+                            f" | {RESULT_NAMES.get(result, result)}"
                         )
                     )
                     try:
