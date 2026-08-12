@@ -290,6 +290,7 @@ def build_submission_urls(handle, submission):
 
 @bot.tree.command(name="register", description="提出結果の通知を登録します")
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
+@app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.describe(
     user="紐づけるDiscordユーザー（省略可）",
     channel="通知を送信するチャンネル（省略時は現在のチャンネル）",
@@ -303,6 +304,14 @@ async def register(
     user: discord.User | None = None,
     notify_wrong_answers: bool = False,
 ):
+    if interaction.guild_id is not None and bot.get_guild(interaction.guild_id) is None:
+        await interaction.response.send_message(
+            "このサーバーにはBot本体が参加していません。"
+            "Botをサーバーに追加してから再試行してください。",
+            ephemeral=True,
+        )
+        return
+
     channel = channel or interaction.channel
     if not isinstance(channel, (discord.TextChannel, discord.DMChannel)):
         await interaction.response.send_message(
