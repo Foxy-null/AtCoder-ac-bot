@@ -26,6 +26,7 @@ def init_db(db_path=DB_PATH):
                     channel_id INTEGER NOT NULL,
                     last_submission_id INTEGER,
                     last_checked_time INTEGER,
+                    notify_wrong_answers INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(atcoder_handle, channel_id)
                 )
                 """
@@ -49,6 +50,16 @@ def init_db(db_path=DB_PATH):
                     FROM users
                     """
                 )
+
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(subscriptions)")
+        }
+        if "notify_wrong_answers" not in columns:
+            conn.execute(
+                "ALTER TABLE subscriptions "
+                "ADD COLUMN notify_wrong_answers INTEGER NOT NULL DEFAULT 0"
+            )
 
         conn.execute(
             """

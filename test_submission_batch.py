@@ -235,6 +235,78 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
             [(ANY, "alice", 100)] * 4,
         )
 
+    async def test_notifies_wrong_answers_only_when_enabled(self):
+        wrong = {
+            **submission(100, 101),
+            "contest_id": "abc001",
+            "problem_id": "abc001_a",
+            "language": "Python",
+            "result": "WA",
+        }
+        waiting = {**wrong, "id": 101, "result": "WJ"}
+        ac_only_channel = SimpleNamespace(send=AsyncMock())
+        all_results_channel = SimpleNamespace(send=AsyncMock())
+
+        async def populate_catalog(session, cache):
+            cache["problems"] = {("abc001", "abc001_a"): "A"}
+            cache["difficulty"] = {"abc001_a": {"difficulty": 800}}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "bot.db"
+            main.init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO subscriptions (
+                        atcoder_handle,
+                        channel_id,
+                        last_checked_time,
+                        notify_wrong_answers
+                    )
+                    VALUES ('alice', ?, 100, ?)
+                    """,
+                    [(10, False), (20, True)],
+                )
+
+            with (
+                patch.object(main, "DB_PATH", db_path),
+                patch.object(main.aiohttp, "ClientSession", ClientSession),
+                patch.object(main.time, "time", return_value=200),
+                patch.object(
+                    main,
+                    "fetch_user_submissions_since",
+                    new=AsyncMock(return_value=[wrong, waiting]),
+                ),
+                patch.object(
+                    main,
+                    "get_accessible_channels",
+                    new=AsyncMock(
+                        return_value=(
+                            {
+                                10: ac_only_channel,
+                                20: all_results_channel,
+                            },
+                            set(),
+                        )
+                    ),
+                ),
+                patch.object(main, "get_problem_catalog", populate_catalog),
+                patch.object(
+                    main,
+                    "resolve_author",
+                    new=AsyncMock(return_value=("Alice", "avatar", "profile")),
+                ),
+            ):
+                await main.check_ac_submissions.coro()
+
+        ac_only_channel.send.assert_not_awaited()
+        all_results_channel.send.assert_awaited_once()
+        self.assertTrue(
+            all_results_channel.send.await_args.kwargs["embed"].title.endswith(
+                "[WA]"
+            )
+        )
+
     async def test_waits_until_title_and_difficulty_are_available(self):
         accepted = {
             **submission(100, 1000),

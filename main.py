@@ -268,18 +268,20 @@ def build_submission_urls(handle, submission):
     }
 
 
-@bot.tree.command(name="register", description="問題をACした際の通知を登録します")
+@bot.tree.command(name="register", description="提出結果の通知を登録します")
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=False)
 @app_commands.describe(
     user="紐づけるDiscordユーザー（省略可）",
     channel="通知を送信するチャンネル（省略時は現在のチャンネル）",
     atcoder_handle="登録したいAtCoderハンドル",
+    notify_wrong_answers="WA・RE・TLEなどの不正解も通知する（省略時はオフ）",
 )
 async def register(
     interaction: discord.Interaction,
     atcoder_handle: str,
     channel: discord.TextChannel | None = None,
     user: discord.User | None = None,
+    notify_wrong_answers: bool = False,
 ):
     channel = channel or interaction.channel
     if not isinstance(channel, (discord.TextChannel, discord.DMChannel)):
@@ -308,13 +310,21 @@ async def register(
             discord_id,
             atcoder_handle,
             channel_id,
-            last_checked_time
+            last_checked_time,
+            notify_wrong_answers
         )
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(atcoder_handle, channel_id) DO UPDATE SET
-            discord_id = excluded.discord_id
+            discord_id = excluded.discord_id,
+            notify_wrong_answers = excluded.notify_wrong_answers
         """,
-        (discord_id, atcoder_handle, channel_id, current_time),
+        (
+            discord_id,
+            atcoder_handle,
+            channel_id,
+            current_time,
+            notify_wrong_answers,
+        ),
     )
     conn.commit()
     conn.close()
@@ -326,7 +336,7 @@ async def register(
 
     await interaction.response.send_message(
         f"{user_text} AtCoderのハンドル 「{atcoder_handle}」 を登録しました！\n"
-        "ACをした際の通知は "
+        f"{'ACと不正解' if notify_wrong_answers else 'ACをした際'}の通知は "
         f"{channel.mention if isinstance(channel, discord.TextChannel) else 'このDM'} "
         "に送信されます。"
     )
@@ -817,7 +827,8 @@ async def check_ac_submissions():
     c = conn.cursor()
     c.execute(
         """
-        SELECT id, discord_id, atcoder_handle, channel_id, last_submission_id, last_checked_time
+        SELECT id, discord_id, atcoder_handle, channel_id, last_submission_id,
+               last_checked_time, notify_wrong_answers
         FROM subscriptions
         """
     )
@@ -848,6 +859,7 @@ async def check_ac_submissions():
             "channel_id": row[3],
             "last_submission_id": row[4],
             "last_checked_time": row[5],
+            "notify_wrong_answers": bool(row[6]),
         }
         subscriptions_by_handle[subscription["atcoder_handle"].lower()].append(
             subscription
@@ -945,7 +957,11 @@ async def check_ac_submissions():
                     if submission_time < notification_start:
                         continue
 
-                    if submission["result"] != "AC":
+                    result = submission["result"]
+                    if result != "AC" and (
+                        not subscription["notify_wrong_answers"]
+                        or result in {"WJ", "WR"}
+                    ):
                         continue
 
                     if (
@@ -980,7 +996,14 @@ async def check_ac_submissions():
                         else "diff: 判定不可"
                     )
                     embed = discord.Embed(
-                        title=metadata["title"] + " <:AC_bot:1342654382277398700>",
+                        title=(
+                            metadata["title"]
+                            + (
+                                " <:AC_bot:1342654382277398700>"
+                                if result == "AC"
+                                else f" [{result}]"
+                            )
+                        ),
                         url=metadata["problem_url"],
                         description=f"[🔎提出]({metadata['submission_url']}) | "
                         + diff_text
