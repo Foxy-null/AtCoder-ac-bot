@@ -42,9 +42,10 @@ class HttpClient:
         return self
 
 
-def register_interaction(channel):
+def register_interaction(channel, guild_id=None):
     return SimpleNamespace(
         channel=channel,
+        guild_id=guild_id,
         response=SimpleNamespace(
             send_message=AsyncMock(),
             defer=AsyncMock(),
@@ -92,6 +93,27 @@ class ChannelAccessTest(unittest.IsolatedAsyncioTestCase):
                 "ACをした際の通知は このDM に送信されます。"
             )
         )
+
+    async def test_rejects_server_without_bot(self):
+        channel = Mock(spec=discord.TextChannel)
+        interaction = register_interaction(channel, guild_id=202)
+
+        with patch.object(main.bot, "get_guild", return_value=None) as get_guild:
+            await main.register.callback(interaction, "alice")
+
+        get_guild.assert_called_once_with(202)
+        interaction.response.send_message.assert_awaited_once_with(
+            "このサーバーにはBot本体が参加していません。"
+            "Botをサーバーに追加してから再試行してください。",
+            ephemeral=True,
+        )
+        interaction.response.defer.assert_not_awaited()
+
+    def test_register_is_guild_install_only(self):
+        command = main.bot.tree.get_command("register")
+
+        self.assertTrue(command.allowed_installs.guild)
+        self.assertFalse(command.allowed_installs.user)
 
     async def test_registers_wrong_answer_notifications(self):
         with tempfile.TemporaryDirectory() as temp_dir:
