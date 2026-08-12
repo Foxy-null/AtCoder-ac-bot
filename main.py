@@ -318,6 +318,26 @@ async def register(
         )
         return
 
+    await interaction.response.defer(thinking=True)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                ATCODER_PROFILE_URL.format(handle=atcoder_handle)
+            ) as response:
+                profile_status = response.status
+    except Exception as error:
+        print(f"AtCoderユーザーの確認に失敗しました: error={error}")
+        profile_status = None
+
+    if profile_status != 200:
+        message = (
+            f"AtCoderのハンドル 「{atcoder_handle}」 は存在しません。"
+            if profile_status == 404
+            else "AtCoderユーザーを確認できませんでした。時間をおいて再試行してください。"
+        )
+        await interaction.edit_original_response(content=message)
+        return
+
     discord_id = user.id if user else None
     channel_id = channel.id
     current_time = int(time.time())
@@ -357,18 +377,22 @@ async def register(
         channel.mention if isinstance(channel, discord.TextChannel) else "このDM"
     )
     if exists:
-        await interaction.response.send_message(
-            f"AtCoderのハンドル 「{atcoder_handle}」 の既存登録を更新しました！\n"
-            f"Discordユーザー: {user.mention if user else 'なし'}\n"
-            f"通知対象: {'ACと不正解' if notify_wrong_answers else 'ACのみ'}\n"
-            f"通知先: {destination}"
+        await interaction.edit_original_response(
+            content=(
+                f"AtCoderのハンドル 「{atcoder_handle}」 の既存登録を更新しました！\n"
+                f"Discordユーザー: {user.mention if user else 'なし'}\n"
+                f"通知対象: {'ACと不正解' if notify_wrong_answers else 'ACのみ'}\n"
+                f"通知先: {destination}"
+            )
         )
     else:
         user_text = f"{user.mention} に" if user else "Discordユーザーなしで"
-        await interaction.response.send_message(
-            f"{user_text} AtCoderのハンドル 「{atcoder_handle}」 を登録しました！\n"
-            f"{'ACと不正解' if notify_wrong_answers else 'ACをした際'}の通知は "
-            f"{destination} に送信されます。"
+        await interaction.edit_original_response(
+            content=(
+                f"{user_text} AtCoderのハンドル 「{atcoder_handle}」 を登録しました！\n"
+                f"{'ACと不正解' if notify_wrong_answers else 'ACをした際'}の通知は "
+                f"{destination} に送信されます。"
+            )
         )
 
 
