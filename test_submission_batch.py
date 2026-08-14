@@ -319,11 +319,11 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         channel = SimpleNamespace(send=AsyncMock())
         catalogs = iter(
             [
-                ({}, {"abc001_a": {"difficulty": 800}}),
+                ({}, {"abc001_a": {"difficulty": -201}}),
                 ({("abc001", "abc001_a"): "A"}, {}),
                 (
                     {("abc001", "abc001_a"): "A"},
-                    {"abc001_a": {"difficulty": 800}},
+                    {"abc001_a": {"difficulty": -201}},
                 ),
             ]
         )
@@ -387,7 +387,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
 
         channel.send.assert_awaited_once()
         self.assertIn(
-            "diff: 800",
+            "diff: 90",
             channel.send.await_args.kwargs["embed"].description,
         )
         self.assertEqual(notified, [(100,)])

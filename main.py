@@ -965,7 +965,7 @@ async def check_ac_submissions():
                 )
 
             if diff is not None and diff <= 400:
-                diff = int(400.0 / math.exp((400.0 - diff) / 400.0))
+                diff = math.ceil(400.0 / math.exp((400.0 - diff) / 400.0))
 
             cached = {
                 "title": problem_title,
