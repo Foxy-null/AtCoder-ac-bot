@@ -7,6 +7,7 @@ import re
 import sqlite3
 import time
 from collections import defaultdict
+from urllib.parse import urlencode
 
 import aiohttp
 import discord
@@ -28,13 +29,17 @@ ATCODER_PROFILE_URL = "https://atcoder.jp/users/{handle}"
 ATCODER_AVATAR_URL = "https://img.atcoder.jp/assets/icon/avatar.png"
 ATCODER_PROBLEMS_URL = "https://kenkoooo.com/atcoder/resources/problems.json"
 ATCODER_DIFFICULTY_URL = "https://kenkoooo.com/atcoder/resources/problem-models.json"
+ATCODER_CONTESTS_URL = "https://kenkoooo.com/atcoder/resources/contests.json"
+ATCODER_CONTEST_PROBLEMS_URL = "https://kenkoooo.com/atcoder/resources/contest-problem.json"
+ATCODER_CONTEST_ARCHIVE_URL = "https://atcoder.jp/contests/archive"
 ATCODER_USER_SUBMISSIONS_URL = (
     "https://kenkoooo.com/atcoder/atcoder-api/v3/user/submissions"
     "?user={handle}&from_second={from_second}"
 )
 ATCODER_SUBMISSION_PAGE_LIMIT = 500
 ATCODER_API_DELAY_SECONDS = 1.1
-PROBLEM_CATALOG_WAIT_SECONDS = 3 * 24 * 60 * 60
+DIFFICULTY_WAIT_SECONDS = 3 * 24 * 60 * 60
+CATALOG_RETRY_SECONDS = 5 * 60
 UNREGISTER_PAGE_SIZE = 10
 UNREGISTER_STATUS = "アプデ: /unregisterで登録解除"
 RESULT_NAMES = {
@@ -234,32 +239,168 @@ async def resolve_author(session, handle, discord_id, atcoder_profile):
 
 
 async def get_problem_catalog(session, cache):
-    if cache["problems"] is not None and cache["difficulty"] is not None:
-        return
-
-    if cache["problems"] is None:
+    for name, url in (
+        ("problems", ATCODER_PROBLEMS_URL),
+        ("difficulty", ATCODER_DIFFICULTY_URL),
+        ("contests", ATCODER_CONTESTS_URL),
+        ("contest_problems", ATCODER_CONTEST_PROBLEMS_URL),
+    ):
+        if name in cache:
+            continue
+        await asyncio.sleep(ATCODER_API_DELAY_SECONDS)
         try:
-            async with session.get(ATCODER_PROBLEMS_URL) as resp:
-                if resp.status == 200:
-                    problems = await resp.json()
-                    cache["problems"] = {
-                        (problem["contest_id"], problem["id"]): problem["title"]
-                        for problem in problems
-                    }
-                else:
-                    cache["problems"] = {}
-        except Exception:
-            cache["problems"] = {}
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"status={resp.status}")
+                data = await resp.json()
+            expected_type = dict if name == "difficulty" else list
+            if not isinstance(data, expected_type):
+                raise ValueError(f"expected {expected_type.__name__}")
+            if name == "problems":
+                data = {
+                    (problem["contest_id"], problem["id"]): problem["title"]
+                    for problem in data
+                }
+            elif name == "contests":
+                for contest in data:
+                    if not (
+                        isinstance(contest["title"], str)
+                        and isinstance(contest["rate_change"], str)
+                        and isinstance(contest["start_epoch_second"], int)
+                        and isinstance(contest["duration_second"], int)
+                    ):
+                        raise ValueError("invalid contest information")
+                data = {contest["id"]: contest for contest in data}
+            elif name == "contest_problems":
+                contests_by_problem = defaultdict(set)
+                for pair in data:
+                    contests_by_problem[pair["problem_id"]].add(pair["contest_id"])
+                data = dict(contests_by_problem)
+            cache[name] = data
+        except Exception as error:
+            print(f"問題情報の取得に失敗しました: resource={name} error={error}")
+            cache[name] = None
 
-    if cache["difficulty"] is None:
+
+async def get_contest_kind(session, contest, cache):
+    contest_id = contest["id"]
+    if re.fullmatch(r"(?:abc|arc|agc)\d+", contest_id):
+        return "Algorithm"
+    if contest_id.startswith("ahc"):
+        return "Heuristic"
+
+    kinds = cache.setdefault("contest_kinds", {})
+    if contest_id not in kinds:
+        query = urlencode({"lang": "en", "keyword": contest["title"]})
         try:
-            async with session.get(ATCODER_DIFFICULTY_URL) as resp:
-                if resp.status == 200:
-                    cache["difficulty"] = await resp.json()
-                else:
-                    cache["difficulty"] = {}
-        except Exception:
-            cache["difficulty"] = {}
+            async with session.get(
+                f"{ATCODER_CONTEST_ARCHIVE_URL}?{query}",
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    raise ValueError(f"status={resp.status}")
+                page = await resp.text()
+            kind = "Unknown"
+            for row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", page, re.DOTALL):
+                if re.search(
+                    rf"href=['\"]/contests/{re.escape(contest_id)}['\"]",
+                    row,
+                ):
+                    match = re.search(r"title=['\"](Algorithm|Heuristic)['\"]", row)
+                    if match:
+                        kind = match.group(1)
+                    break
+            kinds[contest_id] = kind
+        except Exception as error:
+            print(
+                f"コンテスト種別の取得に失敗しました: "
+                f"contest_id={contest_id} error={error}"
+            )
+            kinds[contest_id] = None
+    return kinds[contest_id]
+
+
+def should_wait_for_difficulty(model, contest_end_times, current_time):
+    # Existing models without difficulty have already been processed upstream.
+    return (
+        model is None
+        and bool(contest_end_times)
+        and current_time < min(contest_end_times) + DIFFICULTY_WAIT_SECONDS
+    )
+
+
+async def resolve_problem_difficulty(session, submission, catalog, current_time):
+    """Return (ready_to_notify, difficulty); unavailable data is retried next poll."""
+    await get_problem_catalog(session, catalog)
+    if catalog["difficulty"] is None:
+        return False, None
+
+    contest_id = submission["contest_id"]
+    problem_id = submission["problem_id"]
+    model = catalog["difficulty"].get(problem_id)
+    if model is not None and not isinstance(model, dict):
+        print(f"問題モデルの形式が不正です: problem_id={problem_id}")
+        return False, None
+    diff = model.get("difficulty") if model is not None else None
+    if diff is not None and (
+        isinstance(diff, bool)
+        or not isinstance(diff, (int, float))
+        or not math.isfinite(diff)
+    ):
+        print(f"難易度の形式が不正です: problem_id={problem_id}")
+        return False, None
+    if model is not None and diff is None:
+        return True, None
+    if catalog["contests"] is None or catalog["contest_problems"] is None:
+        return False, None
+
+    contest_ids = catalog["contest_problems"].get(problem_id, set()) | {contest_id}
+    catalog_incomplete = (
+        contest_id not in catalog["contests"]
+        or problem_id not in catalog["contest_problems"]
+    )
+    source_contests = sorted(
+        (
+            catalog["contests"][source_id]
+            for source_id in contest_ids
+            if source_id in catalog["contests"]
+        ),
+        key=lambda contest: contest["start_epoch_second"] or math.inf,
+    )
+    contest_end_times = []
+    is_algorithm = False
+    is_heuristic = contest_id.startswith("ahc")
+    for contest in source_contests:
+        rated = contest["rate_change"].strip() not in {"", "-"}
+        if diff is None and not rated:
+            continue
+        kind = await get_contest_kind(session, contest, catalog)
+        if kind is None:
+            return False, None
+        if kind == "Unknown":
+            catalog_incomplete = True
+        elif kind == "Heuristic":
+            is_heuristic = True
+        elif kind == "Algorithm":
+            is_algorithm = True
+            if rated:
+                contest_end_times.append(
+                    contest["start_epoch_second"] + contest["duration_second"]
+                )
+            if diff is not None:
+                break
+    if is_heuristic and not is_algorithm:
+        diff = None
+    # shortcut: five minutes for catalog lag; fetch contest pages if delays grow.
+    if (
+        model is None
+        and catalog_incomplete
+        and current_time < submission["epoch_second"] + CATALOG_RETRY_SECONDS
+    ):
+        return False, None
+    if diff is None and should_wait_for_difficulty(model, contest_end_times, current_time):
+        return False, None
+    return True, diff
 
 
 async def fetch_problem_title(session, problem_url):
@@ -929,35 +1070,26 @@ async def check_ac_submissions():
         )
 
     async with aiohttp.ClientSession() as session:
-        catalog_cache = {"problems": None, "difficulty": None}
+        catalog_cache = {}
         submission_cache = {}
         current_time = int(time.time())
 
         async def get_submission_metadata(submission):
             submission_id = submission["id"]
-            cached = submission_cache.get(submission_id)
-            if cached is not None:
-                return cached
+            if submission_id in submission_cache:
+                return submission_cache[submission_id]
+            submission_cache[submission_id] = None
 
-            await get_problem_catalog(session, catalog_cache)
+            ready, diff = await resolve_problem_difficulty(
+                session, submission, catalog_cache, current_time
+            )
+            if not ready:
+                return None
             contest_id = submission["contest_id"]
             problem_id = submission["problem_id"]
             problem_key = (contest_id, problem_id)
             urls = build_submission_urls(submission["atcoder_handle"], submission)
-            problem_title = catalog_cache["problems"].get(problem_key)
-            problem_difficulty = catalog_cache["difficulty"].get(problem_id)
-            diff = (
-                problem_difficulty.get("difficulty")
-                if isinstance(problem_difficulty, dict)
-                else None
-            )
-            if (
-                problem_title is None or diff is None
-            ) and submission["epoch_second"] > (
-                current_time - PROBLEM_CATALOG_WAIT_SECONDS
-            ):
-                return None
-
+            problem_title = (catalog_cache["problems"] or {}).get(problem_key)
             if problem_title is None:
                 problem_title = (
                     await fetch_problem_title(session, urls["problem_url"])
