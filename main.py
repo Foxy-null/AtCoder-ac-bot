@@ -7,13 +7,15 @@ import re
 import sqlite3
 import time
 from collections import defaultdict
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 import pytz
+
+from novisteps import get_novisteps_grades
 
 from database import (
     DB_PATH,
@@ -42,16 +44,6 @@ DIFFICULTY_WAIT_SECONDS = 3 * 24 * 60 * 60
 CATALOG_RETRY_SECONDS = 5 * 60
 UNREGISTER_PAGE_SIZE = 10
 UNREGISTER_STATUS = "アプデ: /unregisterで登録解除"
-RESULT_NAMES = {
-    "AC": "Accepted",
-    "CE": "Compilation Error",
-    "IE": "Internal Error",
-    "MLE": "Memory Limit Exceeded",
-    "OLE": "Output Limit Exceeded",
-    "RE": "Runtime Error",
-    "TLE": "Time Limit Exceeded",
-    "WA": "Wrong Answer",
-}
 RESULT_EMOJIS = {
     "AC": "<:AC:1537153851843411989>",
     "CE": "<:CE:1537153874048065667>",
@@ -194,6 +186,34 @@ def difficulty_to_color(difficulty):
     if difficulty < 2800:
         return discord.Color.from_rgb(255, 128, 0)
     return discord.Color.from_rgb(252, 54, 54)
+
+
+def build_difficulty_display(difficulty, grade, problem_id, problem_title):
+    parts = []
+    if difficulty is not None:
+        parts.append(f"diff: {difficulty}")
+    if grade is not None:
+        value = grade["grade"]
+        label = value[1:] + value[0]
+        url = f"https://atcoder-novisteps.vercel.app/votes/{quote(problem_id, safe='')}"
+        parts.append(
+            f"NoviSteps: [{label}]({url})"
+            + ("（暫定）" if grade["provisional"] else "")
+        )
+
+    if difficulty is not None:
+        color = difficulty_to_color(difficulty)
+    elif grade is not None:
+        value = grade["grade"]
+        level = max(0, 3 - int(value[1:])) if value[0] == "Q" else min(7, int(value[1:]) + 2)
+        # These boundaries select colors only; grades never become numerical difficulty.
+        color = difficulty_to_color(level * 400)
+    else:
+        color = difficulty_to_color(None)
+        star = re.search(r"★\s*([1-7])(?!\d)", problem_title)
+        if problem_id.startswith("typical90_") and star:
+            color = difficulty_to_color(max(0, int(star[1]) - 2) * 400)
+    return " | ".join(parts) if parts else "難易度: 不明", color
 
 
 async def fetch_atcoder_profile(session, handle):
@@ -401,6 +421,23 @@ async def resolve_problem_difficulty(session, submission, catalog, current_time)
     if diff is None and should_wait_for_difficulty(model, contest_end_times, current_time):
         return False, None
     return True, diff
+
+
+async def is_heuristic_problem(session, submission, catalog):
+    contest_ids = (catalog["contest_problems"] or {}).get(
+        submission["problem_id"], set()
+    ) | {submission["contest_id"]}
+    heuristic = any(contest_id.startswith("ahc") for contest_id in contest_ids)
+    for contest_id in sorted(contest_ids):
+        contest = (catalog["contests"] or {}).get(contest_id)
+        if contest is None:
+            continue
+        kind = await get_contest_kind(session, contest, catalog)
+        if kind == "Algorithm":
+            return False
+        if kind == "Heuristic":
+            heuristic = True
+    return heuristic
 
 
 async def fetch_problem_title(session, problem_url):
@@ -1073,6 +1110,7 @@ async def check_ac_submissions():
         catalog_cache = {}
         submission_cache = {}
         current_time = int(time.time())
+        novisteps_grades = await get_novisteps_grades(session, DB_PATH, current_time)
 
         async def get_submission_metadata(submission):
             submission_id = submission["id"]
@@ -1099,10 +1137,18 @@ async def check_ac_submissions():
             if diff is not None and diff <= 400:
                 diff = math.ceil(400.0 / math.exp((400.0 - diff) / 400.0))
 
+            grade = novisteps_grades.get(problem_id)
+            if grade is not None and diff is None and await is_heuristic_problem(
+                session, submission, catalog_cache
+            ):
+                grade = None
+            difficulty_text, color = build_difficulty_display(
+                diff, grade, problem_id, problem_title
+            )
             cached = {
                 "title": problem_title,
-                "difficulty": diff,
-                "color": difficulty_to_color(diff),
+                "difficulty_text": difficulty_text,
+                "color": color,
                 **urls,
             }
             submission_cache[submission_id] = cached
@@ -1185,17 +1231,11 @@ async def check_ac_submissions():
                         discord_id,
                         atcoder_profile,
                     )
-                    diff_text = (
-                        f"diff: {metadata['difficulty']}"
-                        if metadata["difficulty"] is not None
-                        else "diff: 判定不可"
-                    )
                     embed = discord.Embed(
-                        title=f"{metadata['title']} {RESULT_EMOJIS.get(result, '')}",
+                        title=f"{metadata['title']} {RESULT_EMOJIS.get(result, result)}",
                         url=metadata["problem_url"],
                         description=f"[🔎提出]({metadata['submission_url']}) | "
-                        + diff_text
-                        + f" | {submission['language']}",
+                        + metadata["difficulty_text"],
                         color=metadata["color"],
                     )
                     embed.set_author(
@@ -1207,7 +1247,7 @@ async def check_ac_submissions():
                         text=(
                             "提出日時: "
                             f"{datetime.datetime.fromtimestamp(submission_time, pytz.timezone('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S')}"
-                            f" | {RESULT_NAMES.get(result, result)}"
+                            f" | {submission['language']}"
                         )
                     )
                     try:

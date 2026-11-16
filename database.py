@@ -71,6 +71,17 @@ def init_db(db_path=DB_PATH):
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS novisteps_cache (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_attempt_at INTEGER,
+                fetched_at INTEGER,
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute("INSERT OR IGNORE INTO novisteps_cache (id) VALUES (1)")
+        conn.execute(
+            """
             INSERT OR IGNORE INTO submission_poll_state (id, last_checked_time)
             SELECT
                 1,
