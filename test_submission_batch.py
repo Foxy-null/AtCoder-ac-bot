@@ -66,6 +66,12 @@ def contest(contest_id, end_time, rate_change="~ 1999"):
 
 
 class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.novisteps = AsyncMock(return_value={})
+        patcher = patch.object(main, "get_novisteps_grades", self.novisteps)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_difficulty_wait_uses_earliest_contest_end_and_only_unprocessed_models(self):
         deadline = 1000 + main.DIFFICULTY_WAIT_SECONDS
         for model, ends, now, expected in (
@@ -352,7 +358,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.send.await_count, 3)
         last_embed = channel.send.await_args_list[-1].kwargs["embed"]
         self.assertTrue(last_embed.title.startswith("abc001 abc001_a"))
-        self.assertIn("diff: 判定不可", last_embed.description)
+        self.assertIn("難易度: 不明", last_embed.description)
         self.assertEqual(notified, [(100,), (200,)])
         self.assertEqual(legacy_cursor, (50, 100))
         self.assertEqual(
@@ -431,7 +437,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.title, "A <:WA:1537153868134096976>")
         self.assertEqual(
             embed.footer.text,
-            "提出日時: 1970-01-01 09:01:41 | Wrong Answer",
+            "提出日時: 1970-01-01 09:01:41 | Python",
         )
 
     async def test_waits_for_new_contest_difficulty_and_notifies_when_available(self):
@@ -536,19 +542,19 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         """
         cases = [
             ("typical90", "typical90_l", None,
-             [contest("typical90", 3_153_600_000, "-")], "diff: 判定不可"),
+             [contest("typical90", 3_153_600_000, "-")], "難易度: 不明"),
             ("awc0001", "awc0001_a", None,
-             [contest("awc0001", recent_end, "-")], "diff: 判定不可"),
+             [contest("awc0001", recent_end, "-")], "難易度: 不明"),
             ("abc010", "abc010_a", None,
-             [contest("abc010", old_end)], "diff: 判定不可"),
+             [contest("abc010", old_end)], "難易度: 不明"),
             ("adt_all_recent", "abc010_a", None,
              [contest("abc010", old_end), contest("adt_all_recent", recent_end, "-")],
-             "diff: 判定不可"),
+             "難易度: 不明"),
             ("abc999", "shared_a", None,
              [contest("abc010", old_end), contest("abc999", recent_end)],
-             "diff: 判定不可"),
+             "難易度: 不明"),
             ("abc999", "abc999_a", {},
-             [contest("abc999", recent_end)], "diff: 判定不可"),
+             [contest("abc999", recent_end)], "難易度: 不明"),
             ("abc999", "abc999_a", {"difficulty": 800},
              [contest("abc999", recent_end)], "diff: 800"),
             ("abs", "abc010_a", {"difficulty": 800, "is_experimental": True},
@@ -557,9 +563,13 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
             ("abc999", "abc999_a", {"difficulty": 0},
              [contest("abc999", recent_end)], "diff: 148"),
             ("ahc999", "ahc999_a", {"difficulty": 2300},
-             [contest("ahc999", recent_end, "All")], "diff: 判定不可"),
+             [contest("ahc999", recent_end, "All")], "難易度: 不明"),
+            ("ahc999", "ahc999_a", {},
+             [contest("ahc999", recent_end, "All")], "難易度: 不明"),
             ("marathon-final", "marathon_a", {"difficulty": 2300},
-             [contest("marathon-final", recent_end, "All")], "diff: 判定不可"),
+             [contest("marathon-final", recent_end, "All")], "難易度: 不明"),
+            ("marathon-final", "marathon_a", {},
+             [contest("marathon-final", recent_end, "All")], "難易度: 不明"),
             ("sponsor-final", "sponsor_a", None,
              [contest("sponsor-final", recent_end)], None),
             ("sponsor-final", "old_unrated_a", None,
@@ -576,6 +586,11 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             for index, (cid, pid, model, sources, expected) in enumerate(cases):
                 with self.subTest(contest_id=cid, problem_id=pid, model=model):
+                    self.novisteps.return_value = (
+                        {pid: {"grade": "D1", "provisional": False}}
+                        if cid in {"ahc999", "marathon-final", "sponsor-final", "abs"}
+                        else {}
+                    )
                     db_path = Path(temp_dir) / f"{index}.db"
                     main.init_db(db_path)
                     with sqlite3.connect(db_path) as conn:
@@ -632,10 +647,90 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
                             embed = channel.send.await_args.kwargs["embed"]
                             self.assertEqual(embed.title, f"A {main.RESULT_EMOJIS['AC']}")
                             self.assertIn(expected, embed.description)
+                            if cid in {"ahc999", "marathon-final"}:
+                                self.assertNotIn("NoviSteps", embed.description)
+                                self.assertEqual(embed.color.value, 0)
+                            if cid == "abs":
+                                self.assertIn(
+                                    "NoviSteps: [1D](https://atcoder-novisteps.vercel.app/votes/abc010_a)",
+                                    embed.description,
+                                )
                         elif cid in {"unknown", "unlisted-final"}:
                             clock.return_value = now + main.CATALOG_RETRY_SECONDS
                             await main.check_ac_submissions.coro()
                             channel.send.assert_awaited_once()
+
+    async def test_notification_layout_with_independent_difficulty_and_grades(self):
+        now = 1000
+        items = [
+            {
+                **submission(100 + index, 999),
+                "contest_id": "abc999", "problem_id": f"abc999_{letter.lower()}",
+                "language": "Python", "result": result,
+            }
+            for index, (letter, result) in enumerate((
+                ("A", "AC"), ("B", "WA"), ("C", "NEW"), ("D", "AC"),
+            ))
+        ]
+        channel = SimpleNamespace(send=AsyncMock())
+        self.novisteps.return_value = {
+            "abc999_a": {"grade": "D1", "provisional": False},
+            "abc999_c": {"grade": "Q2", "provisional": True},
+        }
+
+        async def populate_catalog(session, cache):
+            cache.update(
+                problems={("abc999", item["problem_id"]): chr(65 + i) for i, item in enumerate(items)},
+                difficulty={
+                    "abc999_a": {"difficulty": 1703},
+                    "abc999_b": {"difficulty": 0},
+                    "abc999_c": {}, "abc999_d": {},
+                },
+                contests={"abc999": contest("abc999", -300000)},
+                contest_problems={item["problem_id"]: {"abc999"} for item in items},
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "bot.db"
+            main.init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "INSERT INTO subscriptions "
+                    "(atcoder_handle, channel_id, last_checked_time, notify_wrong_answers) "
+                    "VALUES ('alice', 10, 900, 1)"
+                )
+            with (
+                patch.object(main, "DB_PATH", db_path),
+                patch.object(main.time, "time", return_value=now),
+                patch.object(main.aiohttp, "ClientSession", ClientSession),
+                patch.object(main, "fetch_user_submissions_since", AsyncMock(return_value=items)),
+                patch.object(main, "get_accessible_channels", AsyncMock(return_value=({10: channel}, set()))),
+                patch.object(main, "get_problem_catalog", populate_catalog),
+                patch.object(main, "fetch_atcoder_profile", AsyncMock(return_value={})),
+                patch.object(main, "resolve_author", AsyncMock(return_value=("Alice", "avatar", "profile"))),
+            ):
+                await main.check_ac_submissions.coro()
+            self.novisteps.assert_awaited_once_with(ANY, db_path, now)
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute("SELECT count(*) FROM notified_submissions").fetchone()[0], 4)
+
+        self.assertEqual(channel.send.await_count, 4)
+        expected = [
+            ("diff: 1703 | NoviSteps: [1D](https://atcoder-novisteps.vercel.app/votes/abc999_a)", 0x3636FC),
+            ("diff: 148", 0x808080),
+            ("NoviSteps: [2Q](https://atcoder-novisteps.vercel.app/votes/abc999_c)（暫定）", 0x804000),
+            ("難易度: 不明", 0),
+        ]
+        for index, (text, color) in enumerate(expected):
+            embed = channel.send.await_args_list[index].kwargs["embed"]
+            self.assertEqual(
+                embed.description,
+                f"[🔎提出](https://atcoder.jp/contests/abc999/submissions/{100 + index}) | {text}",
+            )
+            self.assertEqual(embed.footer.text, "提出日時: 1970-01-01 09:16:39 | Python")
+            self.assertNotIn("Python", embed.description)
+            self.assertEqual(embed.color.value, color)
+        self.assertEqual(channel.send.await_args_list[2].kwargs["embed"].title, "C NEW")
 
 
 if __name__ == "__main__":
