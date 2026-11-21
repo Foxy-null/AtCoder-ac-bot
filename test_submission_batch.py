@@ -577,6 +577,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
              None),
             ("abc999", "abc999_a", None,
              [contest("abc999", recent_end)], None),
+            ("abc999", "abc999_a", None, [], None),
             ("abc999", "abc999_a", {"difficulty": "invalid"},
              [contest("abc999", recent_end)], None),
             ("unknown", "unknown_a", None, [], None),
@@ -600,7 +601,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
                             "VALUES (1, 'alice', 10, ?)", (now - 1000,),
                         )
                     accepted = {
-                        **submission(100, now - 1),
+                        **submission(100, now - 600),
                         "contest_id": cid, "problem_id": pid,
                         "language": "Python", "result": "AC",
                     }
@@ -655,8 +656,13 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
                                     "NoviSteps: [1D](https://atcoder-novisteps.vercel.app/votes/abc010_a)",
                                     embed.description,
                                 )
-                        elif cid in {"unknown", "unlisted-final"}:
-                            clock.return_value = now + main.CATALOG_RETRY_SECONDS
+                        elif not sources or cid == "unlisted-final":
+                            clock.return_value = (
+                                accepted["epoch_second"] + main.DIFFICULTY_WAIT_SECONDS - 1
+                            )
+                            await main.check_ac_submissions.coro()
+                            channel.send.assert_not_awaited()
+                            clock.return_value += 1
                             await main.check_ac_submissions.coro()
                             channel.send.assert_awaited_once()
 
