@@ -99,6 +99,28 @@ def init_db(db_path=DB_PATH):
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_difficulty_notifications (
+                message_id INTEGER PRIMARY KEY,
+                subscription_id INTEGER NOT NULL,
+                problem_id TEXT NOT NULL,
+                deadline INTEGER NOT NULL,
+                embed_json TEXT NOT NULL,
+                resolved INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS delete_pending_difficulty_notifications
+            AFTER DELETE ON subscriptions
+            BEGIN
+                DELETE FROM pending_difficulty_notifications
+                WHERE subscription_id = OLD.id;
+            END
+            """
+        )
         if notified_created:
             cutoff = int(time.time()) - SUBMISSION_LOOKBACK_SECONDS
             conn.execute(
@@ -177,9 +199,7 @@ def delete_subscriptions(
         ]
 
     with sqlite3.connect(db_path) as conn:
-        before = conn.total_changes
-        conn.executemany(query, parameters)
-        return conn.total_changes - before
+        return conn.executemany(query, parameters).rowcount
 
 
 def get_submission_poll_time(db_path=DB_PATH):

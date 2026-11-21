@@ -3,7 +3,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import ANY, AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 import main
 
@@ -72,7 +72,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_difficulty_wait_uses_earliest_contest_end_and_only_unprocessed_models(self):
+    async def test_monitors_missing_difficulties_until_earliest_contest_deadline(self):
         deadline = 1000 + main.DIFFICULTY_WAIT_SECONDS
         for model, ends, now, expected in (
             (None, [1000], deadline - 1, True),
@@ -80,13 +80,31 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
             (None, [1000], deadline + 1, False),
             (None, [2000, 1000], deadline, False),
             (None, [], deadline - 1, False),
-            ({}, [1000], deadline - 1, False),
-            ({"difficulty": None}, [1000], deadline - 1, False),
+            ({}, [1000], deadline - 1, True),
+            ({"difficulty": None}, [1000], deadline - 1, True),
+            ({"difficulty": 800}, [1000], deadline - 1, False),
         ):
             with self.subTest(model=model, ends=ends, now=now):
-                self.assertEqual(
-                    main.should_wait_for_difficulty(model, ends, now), expected
+                sources = [contest(f"abc{100 + i}", end) for i, end in enumerate(ends)]
+                catalog = {
+                    "problems": {},
+                    "difficulty": {} if model is None else {"example_a": model},
+                    "contests": {source["id"]: source for source in sources},
+                    "contest_problems": {"example_a": {source["id"] for source in sources}},
+                }
+                ready, diff, monitoring_deadline = await main.resolve_problem_difficulty(
+                    None,
+                    {"contest_id": "abc100", "problem_id": "example_a", "epoch_second": 0},
+                    catalog,
+                    now,
                 )
+                self.assertEqual(
+                    monitoring_deadline is not None, expected
+                )
+                if expected:
+                    self.assertTrue(ready)
+                    self.assertIsNone(diff)
+                    self.assertEqual(monitoring_deadline, deadline)
 
     async def test_loads_catalog_once_per_poll_and_retries_failed_resources_next_poll(self):
         problem = {
@@ -181,7 +199,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
             cache,
             1000,
         )
-        self.assertEqual(result, (True, None))
+        self.assertEqual(result, (True, None, None))
 
     async def test_fetches_and_normalizes_problem_title(self):
         session = Session(
@@ -440,7 +458,7 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
             "提出日時: 1970-01-01 09:01:41 | Python",
         )
 
-    async def test_waits_for_new_contest_difficulty_and_notifies_when_available(self):
+    async def test_notifies_pending_difficulty_and_edits_after_reinitialization(self):
         accepted = {
             **submission(100, 1000),
             "contest_id": "abc001",
@@ -448,7 +466,11 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
             "language": "Python",
             "result": "AC",
         }
-        channel = SimpleNamespace(send=AsyncMock())
+        edit = AsyncMock()
+        channel = SimpleNamespace(
+            send=AsyncMock(return_value=SimpleNamespace(id=999)),
+            get_partial_message=Mock(return_value=SimpleNamespace(edit=edit)),
+        )
         catalogs = iter(
             [
                 ({}, None),
@@ -509,24 +531,36 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
                 ),
             ):
                 await main.check_ac_submissions.coro()
-                await main.check_ac_submissions.coro()
                 channel.send.assert_not_awaited()
+                await main.check_ac_submissions.coro()
+                channel.send.assert_awaited_once()
+                self.assertIn("diff: 未確定", channel.send.await_args.kwargs["embed"].description)
                 with sqlite3.connect(db_path) as conn:
                     self.assertEqual(conn.execute(
                         "SELECT count(*) FROM notified_submissions"
-                    ).fetchone()[0], 0)
+                    ).fetchone()[0], 1)
+                    self.assertEqual(conn.execute(
+                        "SELECT message_id, deadline FROM pending_difficulty_notifications"
+                    ).fetchone(), (999, 1100 + main.DIFFICULTY_WAIT_SECONDS))
 
+                main.init_db(db_path)
+                await main.check_ac_submissions.coro()
                 await main.check_ac_submissions.coro()
 
             with sqlite3.connect(db_path) as conn:
                 notified = conn.execute(
                     "SELECT submission_id FROM notified_submissions"
                 ).fetchall()
+                self.assertEqual(conn.execute(
+                    "SELECT count(*) FROM pending_difficulty_notifications"
+                ).fetchone()[0], 0)
 
         channel.send.assert_awaited_once()
+        channel.get_partial_message.assert_called_once_with(999)
+        edit.assert_awaited_once()
         self.assertIn(
             "diff: 90",
-            channel.send.await_args.kwargs["embed"].description,
+            edit.await_args.kwargs["embed"].description,
         )
         self.assertEqual(notified, [(100,)])
 
@@ -554,7 +588,9 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
              [contest("abc010", old_end), contest("abc999", recent_end)],
              "難易度: 不明"),
             ("abc999", "abc999_a", {},
-             [contest("abc999", recent_end)], "難易度: 不明"),
+             [contest("abc999", recent_end)], "diff: 未確定"),
+            ("abc999", "abc999_a", {"difficulty": None},
+             [contest("abc999", recent_end)], "diff: 未確定"),
             ("abc999", "abc999_a", {"difficulty": 800},
              [contest("abc999", recent_end)], "diff: 800"),
             ("abs", "abc010_a", {"difficulty": 800, "is_experimental": True},
@@ -571,12 +607,12 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
             ("marathon-final", "marathon_a", {},
              [contest("marathon-final", recent_end, "All")], "難易度: 不明"),
             ("sponsor-final", "sponsor_a", None,
-             [contest("sponsor-final", recent_end)], None),
+             [contest("sponsor-final", recent_end)], "diff: 未確定"),
             ("sponsor-final", "old_unrated_a", None,
              [contest("unrated-original", old_end, "-"), contest("sponsor-final", recent_end)],
-             None),
+             "diff: 未確定"),
             ("abc999", "abc999_a", None,
-             [contest("abc999", recent_end)], None),
+             [contest("abc999", recent_end)], "diff: 未確定"),
             ("abc999", "abc999_a", None, [], None),
             ("abc999", "abc999_a", {"difficulty": "invalid"},
              [contest("abc999", recent_end)], None),
@@ -616,7 +652,9 @@ class SubmissionBatchTest(unittest.IsolatedAsyncioTestCase):
 
                     client = ClientSession()
                     client.get = lambda url, **kwargs: Response(archive)
-                    channel = SimpleNamespace(send=AsyncMock())
+                    channel = SimpleNamespace(
+                        send=AsyncMock(return_value=SimpleNamespace(id=999))
+                    )
                     with (
                         patch.object(main, "DB_PATH", db_path),
                         patch.object(main.aiohttp, "ClientSession", return_value=client),
