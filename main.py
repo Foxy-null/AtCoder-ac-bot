@@ -41,7 +41,6 @@ ATCODER_USER_SUBMISSIONS_URL = (
 ATCODER_SUBMISSION_PAGE_LIMIT = 500
 ATCODER_API_DELAY_SECONDS = 1.1
 DIFFICULTY_WAIT_SECONDS = 3 * 24 * 60 * 60
-CATALOG_RETRY_SECONDS = 5 * 60
 UNREGISTER_PAGE_SIZE = 10
 UNREGISTER_STATUS = "アプデ: /unregisterで登録解除"
 RESULT_EMOJIS = {
@@ -411,11 +410,11 @@ async def resolve_problem_difficulty(session, submission, catalog, current_time)
                 break
     if is_heuristic and not is_algorithm:
         diff = None
-    # shortcut: five minutes for catalog lag; fetch contest pages if delays grow.
+    # shortcut: allow 72h of catalog lag; fetch contest pages if delays last longer.
     if (
         model is None
         and catalog_incomplete
-        and current_time < submission["epoch_second"] + CATALOG_RETRY_SECONDS
+        and current_time < submission["epoch_second"] + DIFFICULTY_WAIT_SECONDS
     ):
         return False, None
     if diff is None and should_wait_for_difficulty(model, contest_end_times, current_time):
