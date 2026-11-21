@@ -2,6 +2,7 @@ import asyncio
 import configparser
 import datetime
 import html
+import json
 import math
 import re
 import sqlite3
@@ -187,9 +188,17 @@ def difficulty_to_color(difficulty):
     return discord.Color.from_rgb(252, 54, 54)
 
 
-def build_difficulty_display(difficulty, grade, problem_id, problem_title):
+def adjust_difficulty(difficulty):
+    if difficulty is not None and difficulty <= 400:
+        return math.ceil(400.0 / math.exp((400.0 - difficulty) / 400.0))
+    return difficulty
+
+
+def build_difficulty_display(difficulty, grade, problem_id, problem_title, pending=False):
     parts = []
-    if difficulty is not None:
+    if pending:
+        parts.append("diff: 未確定")
+    elif difficulty is not None:
         parts.append(f"diff: {difficulty}")
     if grade is not None:
         value = grade["grade"]
@@ -339,39 +348,35 @@ async def get_contest_kind(session, contest, cache):
     return kinds[contest_id]
 
 
-def should_wait_for_difficulty(model, contest_end_times, current_time):
-    # Existing models without difficulty have already been processed upstream.
-    return (
-        model is None
-        and bool(contest_end_times)
-        and current_time < min(contest_end_times) + DIFFICULTY_WAIT_SECONDS
-    )
-
-
-async def resolve_problem_difficulty(session, submission, catalog, current_time):
-    """Return (ready_to_notify, difficulty); unavailable data is retried next poll."""
-    await get_problem_catalog(session, catalog)
-    if catalog["difficulty"] is None:
-        return False, None
-
-    contest_id = submission["contest_id"]
-    problem_id = submission["problem_id"]
-    model = catalog["difficulty"].get(problem_id)
+def read_model_difficulty(model):
     if model is not None and not isinstance(model, dict):
-        print(f"問題モデルの形式が不正です: problem_id={problem_id}")
-        return False, None
+        raise ValueError("問題モデルの形式が不正です")
     diff = model.get("difficulty") if model is not None else None
     if diff is not None and (
         isinstance(diff, bool)
         or not isinstance(diff, (int, float))
         or not math.isfinite(diff)
     ):
-        print(f"難易度の形式が不正です: problem_id={problem_id}")
-        return False, None
-    if model is not None and diff is None:
-        return True, None
+        raise ValueError("難易度の形式が不正です")
+    return diff
+
+
+async def resolve_problem_difficulty(session, submission, catalog, current_time):
+    """Return (ready_to_notify, difficulty, monitoring_deadline)."""
+    await get_problem_catalog(session, catalog)
+    if catalog["difficulty"] is None:
+        return False, None, None
+
+    contest_id = submission["contest_id"]
+    problem_id = submission["problem_id"]
+    model = catalog["difficulty"].get(problem_id)
+    try:
+        diff = read_model_difficulty(model)
+    except ValueError as error:
+        print(f"{error}: problem_id={problem_id}")
+        return False, None, None
     if catalog["contests"] is None or catalog["contest_problems"] is None:
-        return False, None
+        return model is not None and diff is None, None, None
 
     contest_ids = catalog["contest_problems"].get(problem_id, set()) | {contest_id}
     catalog_incomplete = (
@@ -395,7 +400,7 @@ async def resolve_problem_difficulty(session, submission, catalog, current_time)
             continue
         kind = await get_contest_kind(session, contest, catalog)
         if kind is None:
-            return False, None
+            return False, None, None
         if kind == "Unknown":
             catalog_incomplete = True
         elif kind == "Heuristic":
@@ -416,10 +421,84 @@ async def resolve_problem_difficulty(session, submission, catalog, current_time)
         and catalog_incomplete
         and current_time < submission["epoch_second"] + DIFFICULTY_WAIT_SECONDS
     ):
-        return False, None
-    if diff is None and should_wait_for_difficulty(model, contest_end_times, current_time):
-        return False, None
-    return True, diff
+        return False, None, None
+    if diff is None and contest_end_times:
+        deadline = min(contest_end_times) + DIFFICULTY_WAIT_SECONDS
+        if current_time < deadline:
+            return True, None, deadline
+    return True, diff, None
+
+
+async def update_pending_difficulties(session, catalog, channels, current_time):
+    conn = get_db_connection()
+    pending = conn.execute(
+        """
+        SELECT message_id, subscription_id, problem_id, deadline, embed_json, resolved
+        FROM pending_difficulty_notifications
+        """
+    ).fetchall()
+    conn.close()
+    difficulties = {}
+    for message_id, subscription_id, problem_id, deadline, embed_json, resolved in pending:
+        embed = discord.Embed.from_dict(json.loads(embed_json))
+        if not resolved:
+            diff = None
+            if current_time < deadline:
+                if "difficulty" not in catalog:
+                    await get_problem_catalog(session, catalog)
+                if catalog["difficulty"] is None:
+                    continue
+                if problem_id not in difficulties:
+                    try:
+                        difficulties[problem_id] = read_model_difficulty(
+                            catalog["difficulty"].get(problem_id)
+                        )
+                    except ValueError as error:
+                        print(f"{error}: problem_id={problem_id}")
+                        continue
+                diff = difficulties[problem_id]
+                if diff is None:
+                    continue
+            diff = adjust_difficulty(diff)
+            embed.description = embed.description.replace(
+                "diff: 未確定", f"diff: {diff}" if diff is not None else "diff: 不明", 1
+            )
+            if diff is not None:
+                embed.color = difficulty_to_color(diff)
+
+        # Recheck the subscription after network I/O so unregistering stops edits.
+        conn = get_db_connection()
+        subscription = conn.execute(
+            "SELECT channel_id FROM subscriptions WHERE id = ?", (subscription_id,)
+        ).fetchone()
+        if subscription is not None and not resolved:
+            # Save the result before editing so retries cannot replace it after expiry.
+            conn.execute(
+                "UPDATE pending_difficulty_notifications "
+                "SET embed_json = ?, resolved = 1 WHERE message_id = ?",
+                (json.dumps(embed.to_dict()), message_id),
+            )
+            conn.commit()
+        conn.close()
+        if subscription is None:
+            continue
+        channel = channels.get(subscription[0])
+        if channel is None:
+            continue
+        try:
+            await channel.get_partial_message(message_id).edit(embed=embed)
+        except (discord.Forbidden, discord.NotFound) as error:
+            print(f"難易度通知の編集を終了しました: message_id={message_id} error={error}")
+        except Exception as error:
+            print(f"難易度通知の編集に失敗しました: message_id={message_id} error={error}")
+            continue
+        conn = get_db_connection()
+        conn.execute(
+            "DELETE FROM pending_difficulty_notifications WHERE message_id = ?",
+            (message_id,),
+        )
+        conn.commit()
+        conn.close()
 
 
 async def is_heuristic_problem(session, submission, catalog):
@@ -1110,6 +1189,7 @@ async def check_ac_submissions():
         submission_cache = {}
         current_time = int(time.time())
         novisteps_grades = await get_novisteps_grades(session, DB_PATH, current_time)
+        await update_pending_difficulties(session, catalog_cache, channels, current_time)
 
         async def get_submission_metadata(submission):
             submission_id = submission["id"]
@@ -1117,7 +1197,7 @@ async def check_ac_submissions():
                 return submission_cache[submission_id]
             submission_cache[submission_id] = None
 
-            ready, diff = await resolve_problem_difficulty(
+            ready, diff, deadline = await resolve_problem_difficulty(
                 session, submission, catalog_cache, current_time
             )
             if not ready:
@@ -1133,8 +1213,7 @@ async def check_ac_submissions():
                     or f"{contest_id} {problem_id}"
                 )
 
-            if diff is not None and diff <= 400:
-                diff = math.ceil(400.0 / math.exp((400.0 - diff) / 400.0))
+            diff = adjust_difficulty(diff)
 
             grade = novisteps_grades.get(problem_id)
             if grade is not None and diff is None and await is_heuristic_problem(
@@ -1142,12 +1221,13 @@ async def check_ac_submissions():
             ):
                 grade = None
             difficulty_text, color = build_difficulty_display(
-                diff, grade, problem_id, problem_title
+                diff, grade, problem_id, problem_title, pending=deadline is not None
             )
             cached = {
                 "title": problem_title,
                 "difficulty_text": difficulty_text,
                 "color": color,
+                "deadline": deadline,
                 **urls,
             }
             submission_cache[submission_id] = cached
@@ -1250,7 +1330,7 @@ async def check_ac_submissions():
                         )
                     )
                     try:
-                        await channel.send(embed=embed)
+                        message = await channel.send(embed=embed)
                     except (discord.Forbidden, discord.NotFound) as error:
                         unregister_channel(channel_id, error)
                         channels.pop(channel_id, None)
@@ -1274,6 +1354,18 @@ async def check_ac_submissions():
                         """,
                         notification_key,
                     )
+                    if metadata["deadline"] is not None:
+                        c.execute(
+                            """
+                            INSERT INTO pending_difficulty_notifications (
+                                message_id, subscription_id, problem_id, deadline, embed_json
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                message.id, subscription["id"], submission["problem_id"],
+                                metadata["deadline"], json.dumps(embed.to_dict()),
+                            ),
+                        )
                     conn.commit()
                     conn.close()
                     notified_submissions.add(notification_key)

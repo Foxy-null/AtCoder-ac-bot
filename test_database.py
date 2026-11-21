@@ -16,6 +16,40 @@ from database import (
 
 
 class InitDbTest(unittest.TestCase):
+    def test_pending_notifications_survive_reinitialization_and_follow_unregistration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "bot.db"
+            init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.executemany(
+                    "INSERT INTO subscriptions (discord_id, atcoder_handle, channel_id) "
+                    "VALUES (?, ?, ?)",
+                    [(1, "alice", 10), (2, "bob", 20), (3, "carol", 30)],
+                )
+                conn.executemany(
+                    "INSERT INTO pending_difficulty_notifications "
+                    "(message_id, subscription_id, problem_id, deadline, embed_json) "
+                    "VALUES (?, ?, 'example_a', 2000, '{}')",
+                    [(101, 1), (102, 1), (201, 2), (301, 3)],
+                )
+                conn.execute("INSERT INTO notified_submissions VALUES (1, 100)")
+            init_db(db_path)
+            init_db(db_path)
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute(
+                    "SELECT count(*) FROM pending_difficulty_notifications"
+                ).fetchone()[0], 4)
+
+            self.assertEqual(delete_subscriptions([(1, 10)], 1, db_path), 1)
+            self.assertEqual(delete_subscriptions_for_channel(20, db_path), 1)
+            with sqlite3.connect(db_path) as conn:
+                self.assertEqual(conn.execute(
+                    "SELECT message_id FROM pending_difficulty_notifications"
+                ).fetchall(), [(301,)])
+                self.assertEqual(conn.execute(
+                    "SELECT * FROM notified_submissions"
+                ).fetchall(), [(1, 100)])
+
     def test_adds_wrong_answer_option_to_existing_subscriptions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "bot.db"
